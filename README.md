@@ -45,6 +45,31 @@ pnpm start     # 单进程同时提供页面与 /api，默认 http://127.0.0.1:8
 （express + undici，约 6 MB）→ `runtime` 以非 root 运行。前端依赖（react / antd / vite）
 都在 `devDependencies`，因为它们已被 Vite 打进 `web/dist`，服务端进程从不 require 它们。
 
+### 用 Docker Compose
+
+```bash
+cp .env.example .env     # 填好 REGISTRY_URL
+docker compose up -d --build
+```
+
+`.env` 里的变量（`REGISTRY_URL` 必填，没填会直接报错而不是起一个连不上 registry 的容器）：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `REGISTRY_URL` | 无（必填） | 要管理的 registry 地址 |
+| `REGISTRY_PROXY` | 空 | 访问 registry 的 HTTP 代理；留空直连 |
+| `REGISTRY_NAME` | `镜像仓库` | 展示名称 |
+| `REGISTRY_CACHE_TTL_SECONDS` | `60` | 清单缓存时长 |
+| `REGISTRY_ALLOW_DELETE` | `true` | `false` = 只读模式，拒绝所有删除 |
+| `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
+| `IMAGE` | `registry-manager:0.1.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
+
+注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
+后者要 `docker compose build --build-arg HTTPS_PROXY=...`。
+
+健康检查继承自镜像里的 `HEALTHCHECK`，compose 不重复声明，避免两处漂移。
+
 ### 构建
 
 ```bash

@@ -115,6 +115,12 @@ node server/index.mjs
   `EACCES: permission denied, open '/app/server/index.mjs'`。
 - `registry.config.json` 由 `.dockerignore` 排除，**绝不能打进镜像**（会把某台机器的地址与代理固化）。
 - 基础镜像可用 `--build-arg NODE_IMAGE=` 覆盖，供拉不到 Docker Hub 的构建机使用。
+- `docker-compose.yml` 是给人用的便捷入口，**它传的环境变量必须以 `server/config.mjs`
+  实际读取的为准**（`REGISTRY_URL` / `REGISTRY_NAME` / `REGISTRY_PROXY` /
+  `REGISTRY_CACHE_TTL_SECONDS` / `REGISTRY_ALLOW_DELETE`），不要自造变量名。
+  新增配置项时要同步四处：`config.mjs`、`docker-compose.yml`、`.env.example`、README 的变量表。
+- `docker-compose.yml` 不重复声明 `healthcheck`（继承镜像），避免两处漂移。
+- `.env` 被 `.gitignore` 忽略，`.env.example` 要提交。
 
 ## 改动后如何验证
 
