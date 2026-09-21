@@ -1,0 +1,41 @@
+import type { ApiResult, AppConfig, DeleteTagPayload, Inventory } from './types';
+
+/**
+ * 所有接口都返回 `{ success, code, message, data }`。
+ * 失败不抛异常而是返回结构体：错误原因是页面要内联展示的领域事实
+ * （例如 registry 未开启删除），需要连同 code 一起渲染。
+ */
+async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
+  try {
+    const response = await fetch(path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...init,
+    });
+    const payload = (await response.json()) as ApiResult<T>;
+    if (typeof payload?.success !== 'boolean') {
+      return { success: false, code: 'INVALID_RESPONSE', message: '服务返回了非预期响应' };
+    }
+    return payload;
+  } catch (error) {
+    return {
+      success: false,
+      code: 'NETWORK_ERROR',
+      message: `无法连接管理服务: ${(error as Error)?.message ?? error}`,
+    };
+  }
+}
+
+export const fetchConfig = () => request<AppConfig>('/api/config');
+
+export const fetchInventory = () => request<Inventory>('/api/inventory');
+
+export const refreshInventory = () => request<Inventory>('/api/refresh', { method: 'POST' });
+
+export const probeRegistry = () =>
+  request<{ apiVersion: string; host: string }>('/api/probe', { method: 'POST' });
+
+export const deleteTag = (repository: string, tag: string) =>
+  request<DeleteTagPayload>(
+    `/api/tags?repository=${encodeURIComponent(repository)}&tag=${encodeURIComponent(tag)}`,
+    { method: 'DELETE' }
+  );

@@ -1,0 +1,246 @@
+/*
+ * 应用外壳与页面骨架。
+ *
+ * 结构对齐 平台 控制台（web/src/app/layout.tsx 的 header + main，
+ * 以及 web/src/components/sub-layout 的 segmented 分支）：
+ *   header（sticky 顶栏）→ main（p-4）→ 顶部横向 Segmented 导航 → 内容区
+ * 颜色一律走 theme.css 里的语义 token。
+ */
+
+/*
+ * 高度必须用视口单位，不能用 height:100%。
+ * AntD 的 <App> 默认会插入一层 <div class="ant-app">，那一层没有高度，
+ * 百分比高度会因此失效 —— 外壳退化成内容高度，滚动从 .app-content 转移到整个文档，
+ * 内容就会从 sticky 顶栏下面穿过去（顶栏透明时表现为字体重叠）。
+ */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/*
+ * 顶栏。平台 的 .header-bg 默认透明，靠滚动监听在滚动后加背景；
+ * 这里直接用页面底色：与透明在视觉上等价（底色相同），但内容绝不会透出来。
+ */
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 58px;
+  padding: 0 16px;
+  background: var(--color-background-body);
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-1);
+  white-space: nowrap;
+}
+
+.app-header-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-text-3);
+}
+
+.app-header-meta .ellipsis {
+  max-width: 340px;
+}
+
+/* main：平台 的 .main-content 是 flex-1 + p-4 + 内阴影。 */
+.app-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  padding: 16px;
+  box-shadow: inset 0 6px 10px -6px rgba(0, 0, 0, 0.03);
+}
+
+/* 顶部横向导航条：对应 sub-layout 的 .segmentedNav */
+.app-nav {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 10px;
+}
+
+/* 对应 sub-layout/index.module.scss 里对 .sub-layout-segmented 的覆写 */
+.app-nav .ant-segmented {
+  background: transparent;
+  color: var(--color-text-1);
+}
+
+.app-nav .ant-segmented .ant-segmented-item {
+  margin-right: 8px;
+  padding: 3px 6px;
+}
+
+.app-nav .ant-segmented .ant-segmented-item-selected {
+  color: var(--color-primary);
+}
+
+.app-nav-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.app-nav-icon {
+  display: inline-flex;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.app-content {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: auto;
+}
+
+/* 页面骨架。外边距由 .app-main 的 p-4 提供，页面内不要再加外边距。 */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--color-text-1);
+}
+
+.page-subtitle {
+  margin: 4px 0 0;
+  max-width: 720px;
+  /* 与 PageHeaderShell 的 subtitleClassName 一致：text-sm */
+  font-size: 14px;
+  color: var(--color-text-3);
+}
+
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+/* 解剖对齐 平台 summary-metric-card：rounded-lg + border + bg-1 */
+.metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background: var(--color-bg-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.metric-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.metric-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}
+
+.metric-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--color-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+  color: var(--color-text-1);
+  word-break: break-all;
+}
+
+.metric-value.is-text {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.panel {
+  padding: 4px 0;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.drawer-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
+.drawer-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.link-cell {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-primary);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+}
+
+.link-cell:hover {
+  text-decoration: underline;
+}

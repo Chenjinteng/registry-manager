@@ -1,0 +1,77 @@
+/*
+ * 设计 token 直接取自 平台 的 light 语义色板（web/src/theme/defaults.ts），
+ * 变量名与 平台 的 CSS 变量约定一致（web/src/theme/css-adapter.ts）。
+ * 这样页面不需要依赖 平台 的任何代码，却能保持同一套视觉语言。
+ */
+:root {
+  --color-primary: #155aef;
+  --color-primary-foreground: #ffffff;
+  --color-primary-bg-active: #e1edfc;
+  --color-secondary: #f2f4f7;
+
+  --color-text-1: #1e252e;
+  --color-text-2: #475468;
+  --color-text-3: #7588a3;
+  --color-text-4: #b2bdcc;
+
+  --color-bg: #ffffff;
+  --color-bg-hover: #f2f4f7;
+  --color-bg-1: #ffffff;
+  --color-bg-4: #f4f5f8;
+
+  --color-border: #eaecf0;
+  --color-border-1: #edeff3;
+  --color-border-2: #e6e9ee;
+  --color-border-3: #d1d7e1;
+
+  --color-fill-1: #f6f8f9;
+  --color-fill-2: #f4f5f8;
+  --color-fill-3: #edeff3;
+  --color-fill-4: #e6e9ee;
+
+  --color-success: #27c274;
+  --color-warning: #faad14;
+  --color-info: #1677ff;
+  --color-fail: #f43b2c;
+
+  --color-background-body: #f2f4f7;
+  --color-side-nav-text: #475468;
+  --color-side-nav-text-active: #155aef;
+  --color-side-nav-bg: #ffffff;
+  --color-side-nav-hover-bg: #f2f4f7;
+  --color-side-nav-active-bg: #155aef14;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-background-body);
+  color: var(--color-text-1);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 长资源名必须能安全省略；配合 title 展示完整值。 */
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

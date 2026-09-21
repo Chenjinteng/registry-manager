@@ -1,0 +1,4 @@
+# pnpm 11 从这里读取构建脚本白名单。esbuild 需要 postinstall 落地平台二进制，
+# 否则 Vite 无法启动。
+allowBuilds:
+  esbuild: true

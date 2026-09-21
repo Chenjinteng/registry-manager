@@ -1,0 +1,21 @@
+# 构建上下文只需要源码与依赖清单，其余一律不进上下文。
+
+# 依赖与产物在镜像内重新生成，不进上下文（否则会覆盖镜像内的正确产物）。
+node_modules
+**/node_modules
+web/dist
+
+# 本机环境相关的配置绝不能进镜像：它含具体的 registry 地址与代理。
+# 镜像里一律用环境变量或挂载注入。
+registry.config.json
+.env
+.env.*
+
+# 开发与版本控制噪音
+.git
+.gitignore
+.github
+*.log
+Dockerfile
+.dockerignore
+README.md

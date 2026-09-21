@@ -1,0 +1,8 @@
+{
+  "name": "内网离线镜像源",
+  "url": "http://192.0.2.10:10001",
+  "proxy": "",
+  "cacheTtlSeconds": 60,
+  "allowDelete": true,
+  "port": 8787
+}
