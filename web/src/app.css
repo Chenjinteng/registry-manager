@@ -244,3 +244,30 @@
 .link-cell:hover {
   text-decoration: underline;
 }
+
+/* 镜像拉取页：3 列等宽输入，窄屏自动塌成单列。 */
+.pull-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 16px;
+}
+
+.pull-running-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.pull-phase-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pull-phase-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}

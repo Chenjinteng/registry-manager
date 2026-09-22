@@ -44,6 +44,69 @@ export function buildPullCommand(host: string, repository: string, tag: string):
 }
 
 /**
+ * 把用户输入的镜像名拆成 (sourceUrl, sourceRef)。
+ *
+ *  - `alpine:3.19` / `library/alpine:3.19`             → docker.io
+ *  - `ghcr.io/<repo>:<tag>` / `quay.io/...`             → 对应官方源（https）
+ *  - `192.0.2.10:10001/<repo>:<tag>`                   → http（端口 443 → https）
+ *  - 任意主机作为前缀且 ref 里还含 `:` 时，按前缀切；否则视为 docker.io。
+ *
+ * 输入只信任前半段的"主机"形状，repo/tag 完整性由后端决定，
+ * 返回的 sourceUrl / sourceRef 都不再做正则二次校验。
+ */
+export interface ParsedImageRef {
+  sourceUrl: string;
+  sourceRef: string;
+}
+
+const KNOWN_HOSTS = new Set([
+  'docker.io',
+  'ghcr.io',
+  'gcr.io',
+  'quay.io',
+  'registry.k8s.io',
+  'mcr.microsoft.com',
+  'registry.access.redhat.com',
+]);
+
+function isHostSegment(segment: string): boolean {
+  if (!segment) return false;
+  // 含点 / 含端口 / 已知公共镜像源 视为"主机段"
+  if (KNOWN_HOSTS.has(segment)) return true;
+  if (segment.includes('.')) return true;
+  if (segment.includes(':')) return true;
+  return false;
+}
+
+function inferProtocol(host: string): 'http' | 'https' {
+  // 端口 443 或 8443 走 https；显式带端口且不是 80/443 的内网 registry 走 http。
+  const portMatch = host.match(/:(\d+)$/);
+  if (!portMatch) return 'https';
+  const port = Number(portMatch[1]);
+  if (port === 443 || port === 8443 || port === 5000) return 'https';
+  return 'http';
+}
+
+export function parseImageReference(raw: string): ParsedImageRef {
+  const value = String(raw ?? '').trim();
+  if (!value) {
+    return { sourceUrl: 'https://registry-1.docker.io', sourceRef: '' };
+  }
+  // docker 引用的合法字符（不含 '@',不在用户原文里用作前缀）
+  const firstSlash = value.indexOf('/');
+  if (firstSlash > 0) {
+    const head = value.slice(0, firstSlash);
+    const tail = value.slice(firstSlash + 1);
+    if (isHostSegment(head)) {
+      const protocol = inferProtocol(head);
+      return { sourceUrl: `${protocol}://${head}`, sourceRef: tail };
+    }
+  }
+  // 没有主机前缀 → docker.io
+  return { sourceUrl: 'https://registry-1.docker.io', sourceRef: value };
+}
+
+/**
  * 复制文本到剪贴板，返回是否成功。
  *
  * `navigator.clipboard` **只在安全上下文**（HTTPS 或 localhost）下存在。

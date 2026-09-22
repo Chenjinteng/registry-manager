@@ -1,4 +1,11 @@
-import type { ApiResult, AppConfig, DeleteTagPayload, Inventory } from './types';
+import type {
+  ApiResult,
+  AppConfig,
+  DeleteTagPayload,
+  Inventory,
+  PullJob,
+  PullJobInput,
+} from './types';
 
 /**
  * 所有接口都返回 `{ success, code, message, data }`。
@@ -39,3 +46,19 @@ export const deleteTag = (repository: string, tag: string) =>
     `/api/tags?repository=${encodeURIComponent(repository)}&tag=${encodeURIComponent(tag)}`,
     { method: 'DELETE' }
   );
+
+export const createPullJob = (input: PullJobInput) =>
+  request<PullJob>('/api/pull/jobs', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+
+export const listPullJobs = () => request<PullJob[]>('/api/pull/jobs');
+
+export const getPullJob = (id: string) => request<PullJob>(`/api/pull/jobs/${encodeURIComponent(id)}`);
+
+export const cancelPullJob = (id: string) =>
+  request<PullJob>(`/api/pull/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+
+export const removePullJob = (id: string) =>
+  request<{ id: string }>(`/api/pull/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });

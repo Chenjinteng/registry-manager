@@ -1,12 +1,13 @@
 import { useState, type ReactNode } from 'react';
 import { App as AntdApp, Segmented, Tag } from 'antd';
-import { DockerOutlined, SettingOutlined } from '@ant-design/icons';
+import { CloudDownloadOutlined, DockerOutlined, SettingOutlined } from '@ant-design/icons';
 
 import ImagesPage from './pages/images-page';
+import PullPage from './pages/pull-page';
 import SettingsPage from './pages/settings-page';
 import type { AppConfig, Inventory } from './types';
 
-type PageKey = 'images' | 'settings';
+type PageKey = 'images' | 'pull' | 'settings';
 
 /**
  * 布局对齐 平台 控制台（web/src/app/layout.tsx + web/src/components/sub-layout）：
@@ -15,6 +16,7 @@ type PageKey = 'images' | 'settings';
  */
 const NAV_ITEMS: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'images', label: '镜像列表', icon: <DockerOutlined /> },
+  { key: 'pull', label: '镜像拉取', icon: <CloudDownloadOutlined /> },
   { key: 'settings', label: '设置', icon: <SettingOutlined /> },
 ];
 
@@ -45,6 +47,7 @@ export default function App() {
           <div className="app-header-meta">
             {config?.usingProxy ? <Tag color="gold">经代理</Tag> : null}
             {config && !config.allowDelete ? <Tag color="green">只读模式</Tag> : null}
+            {config && !config.allowPull ? <Tag color="default">禁止拉取</Tag> : null}
             <span className="ellipsis mono" title={config?.url}>
               {config ? config.url : '加载中…'}
             </span>
@@ -68,6 +71,8 @@ export default function App() {
                 onInventoryChange={setInventory}
                 onGoSettings={() => setPage('settings')}
               />
+            ) : page === 'pull' ? (
+              <PullPage config={config} />
             ) : (
               <SettingsPage
                 config={config}
