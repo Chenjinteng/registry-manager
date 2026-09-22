@@ -166,16 +166,21 @@ export class RegistryClient {
   /**
    * 取一个可用的 Bearer token（命中缓存则直接返回）。
    *
+   * `scope` **允许为空**：registry 的 `/v2/` 挑战本来就不带 scope，这时要申请一个
+   * 无 scope 的 token（`docker login` 验证凭据就是这么做的）。
+   * 之前对空 scope 直接 return null，导致"源可达性探测"（打 /v2/）对 Docker Hub
+   * 永远失败 —— 预览报"要求认证"，用户连入队按钮都点不了。
+   *
    * 没有挑战信息时先 ping 一次 `/v2/` 把挑战头拿回来 —— 这是流式请求
    * （body 不可重放、无法"401 后重试"）能够带认证的前提。
    */
   async tokenFor(scope, { signal, dispatcher } = {}) {
-    if (!scope) return null;
-    const hit = this.tokenCache.get(scope);
+    const cacheKey = scope ?? '';
+    const hit = this.tokenCache.get(cacheKey);
     if (hit && Date.now() < hit.expiresAt) {
       return hit.token;
     }
-    this.tokenCache.delete(scope);
+    this.tokenCache.delete(cacheKey);
 
     if (!this.bearerChallenge) {
       const discovered = await this.#discoverChallenge({ signal, dispatcher });
@@ -186,6 +191,7 @@ export class RegistryClient {
     if (challenge.service) {
       url.searchParams.set('service', challenge.service);
     }
+    // 挑战头里的 scope 优先；没有就用调用方推导的；两者都没有就不带 scope。
     const effectiveScope = challenge.scope || scope;
     if (effectiveScope) {
       url.searchParams.set('scope', effectiveScope);
@@ -282,8 +288,9 @@ export class RegistryClient {
     }
 
     // 有缓存 token 就直接带上，省掉一次 401 往返。
+    // scope 可能为空（例如 /v2/ 探测）：空 scope 也是一个合法的缓存键。
     const scope = scopeForPath(path, method);
-    const cachedToken = scope ? this.tokenCache.get(scope)?.token : undefined;
+    const cachedToken = this.tokenCache.get(scope ?? '')?.token;
     if (cachedToken) {
       headers.Authorization = `Bearer ${cachedToken}`;
     }
@@ -310,9 +317,7 @@ export class RegistryClient {
         if (challenge) {
           this.bearerChallenge = challenge;
           // 之前那个 token 没能通过，清掉强制重取。
-          if (scope) {
-            this.tokenCache.delete(scope);
-          }
+          this.tokenCache.delete(scope ?? '');
           const token = await this.tokenFor(scope, { signal, dispatcher });
           if (token) {
             response = await send({ ...headers, Authorization: `Bearer ${token}` });
@@ -802,7 +807,7 @@ export class RegistryClient {
       // 纯属浪费，在受保护的仓库上还可能触发匿名访问告警。
       const scope = scopeForPath(url.pathname, 'PATCH');
       let bearer;
-      if (scope && this.bearerChallenge) {
+      if (this.bearerChallenge) {
         try {
           bearer = await this.tokenFor(scope, { signal });
         } catch {

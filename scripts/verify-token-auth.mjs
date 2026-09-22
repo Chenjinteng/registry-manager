@@ -88,9 +88,14 @@ const server = createServer((req, res) => {
   }
 
   res.setHeader('Docker-Distribution-Api-Version', 'registry/2.0');
-  const challenge = () => {
+  // 与 Docker Hub 一致：/v2/ 的挑战**不带 scope**，仓库路径上的才带。
+  const challenge = (withScope) => {
     res.statusCode = 401;
-    res.setHeader('WWW-Authenticate', `Bearer realm="${serverBase}/token",service="mock-registry"`);
+    res.setHeader(
+      'WWW-Authenticate',
+      `Bearer realm="${serverBase}/token",service="mock-registry"` +
+        (withScope ? `,scope="repository:${withScope}:pull"` : '')
+    );
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ errors: [{ code: 'UNAUTHORIZED' }] }));
   };
@@ -107,6 +112,7 @@ const server = createServer((req, res) => {
   }
 
   if (req.url === '/v2/') {
+    // 探测端点：无 scope 的 token 即可通过（Docker Hub 同样如此）
     res.statusCode = 200;
     res.end();
     return;
@@ -162,6 +168,31 @@ serverBase = baseUrl;
     '令牌请求带上了 service 参数',
     issuedTokens.every((t) => t.service === 'mock-registry'),
     String(issuedTokens[0]?.service)
+  );
+}
+
+// ---------------- 场景 1b：probe()（打 /v2/，挑战不带 scope）----------------
+// 这正是用户报的"预览说源不可达/要求认证"—— 探测端点的挑战没有 scope，
+// 早期实现对空 scope 直接放弃申请 token，于是 Docker Hub 上永远探测失败。
+{
+  const before = issuedTokens.length;
+  const client = new RegistryClient({ url: baseUrl });
+  let probe = null;
+  let thrown = null;
+  try {
+    probe = await client.probe({ origin: 'source' });
+  } catch (error) {
+    thrown = error;
+  }
+  check(
+    'probe 打 /v2/ 能成功（挑战不带 scope 也要申请无 scope token）',
+    probe?.apiVersion === 'registry/2.0',
+    probe?.apiVersion ?? `${thrown?.code}: ${String(thrown?.message).slice(0, 50)}`
+  );
+  check(
+    '确实申请了一个**无 scope** 的 token',
+    issuedTokens.slice(before).some((t) => t.scope === ''),
+    JSON.stringify(issuedTokens.slice(before).map((t) => t.scope))
   );
 }
 
