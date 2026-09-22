@@ -379,16 +379,41 @@ docker compose exec registry-manager ls -ld /app/data
 docker compose exec registry-manager sh -c 'touch /app/data/.probe && echo 可写 || echo 不可写'
 ```
 
-按部署方式挑一条修：
+按情况挑一条修：
 
-**1. 用的还是旧镜像**（最常见）。镜像已通过
+**1. `REGISTRY_CREDENTIALS_DIR` 指的是宿主机路径，但没挂载进容器**（最容易踩）。
+容器有独立的文件系统，**看不到宿主机的 `/data/...`**；服务会以非 root 用户去
+`mkdir` 那个路径，因为无权创建顶层目录而失败：
+
+```
+数据目录不可用：/data/registry-manager
+  原因：EPERM ... mkdir '/data/registry-manager'
+```
+
+在宿主机上明明能看到、甚至 `777` 也没用 —— 那是宿主机的事。确认：
+
+```bash
+docker compose exec registry-manager ls -ld /data          # No such file or directory
+docker inspect registry-manager --format '{{json .Mounts}}' # [] 就是没挂
+```
+
+挂上即可（宿主目录是 777 时不用改属主，node 用户能写）：
+
+```yaml
+    volumes:
+      - /data/registry-manager:/app/data
+```
+
+然后把 `REGISTRY_CREDENTIALS_DIR` **删掉**，用镜像默认的 `/app/data` 最省事。
+
+**2. 用的还是旧镜像**。镜像已通过
 `RUN mkdir -p /app/data && chown node:node /app/data` 预建好该目录，旧镜像里没有：
 
 ```bash
 docker compose up -d --build
 ```
 
-**2. 命名卷是早先用旧镜像建出来的**，挂载点上没有镜像里的目录，Docker 就按 root 建了。
+**3. 命名卷是早先用旧镜像建出来的**，挂载点上没有镜像里的目录，Docker 就按 root 建了。
 这时重新构建镜像也**不会**改已有卷的属主（Docker 只在卷首次创建时拷贝属主）。
 卷里本来就没数据，删掉重建：
 
@@ -399,13 +424,13 @@ docker volume rm <上面那个卷名>
 docker compose up -d
 ```
 
-**3. 用了 bind mount**，宿主机目录的属主必须是容器内的 uid 1000：
+**4. 用了 bind mount**，宿主机目录的属主必须是容器内的 uid 1000：
 
 ```bash
 sudo chown -R 1000:1000 ./data
 ```
 
-**4. 只想先跑起来**（**不持久化**，容器重建即丢）：
+**5. 只想先跑起来**（**不持久化**，容器重建即丢）：
 
 ```bash
 -e REGISTRY_CREDENTIALS_DIR=/tmp/registry-manager-data

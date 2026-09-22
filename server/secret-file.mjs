@@ -147,16 +147,21 @@ export class EncryptedCollection {
         `数据目录不可用：${dir}\n` +
           `  原因：${code} ${error?.message ?? error}\n` +
           `  当前进程身份：uid=${uid} gid=${gid}\n` +
-          `  该目录必须【存在】且对上面这个 uid 可写。按部署方式挑一条：\n` +
-          `  · 容器：本镜像已预建 /app/data 并交给 node 用户，报这个错多半是在用旧镜像 ——\n` +
+          `  该目录必须【存在】且对上面这个 uid 可写。按情况挑一条：\n` +
+          `  · 若这个路径是【宿主机】上的目录：容器有独立的文件系统，看不到宿主机路径，\n` +
+          `    必须先挂载进来（注意 compose 里 volumes 不能是注释状态）。改完重启：\n` +
+          `      volumes:\n` +
+          `        - /宿主机/目录:/app/data\n` +
+          `    然后把 REGISTRY_CREDENTIALS_DIR 去掉（用镜像默认的 /app/data）最省事。\n` +
+          `  · 容器 + 用旧镜像（本镜像已预建 /app/data 并交给 node 用户）：\n` +
           `      docker compose up -d --build\n` +
-          `  · 容器：命名卷是早先用旧镜像建的，属主成了 root。卷里本来就没数据，删掉重建：\n` +
+          `  · 容器 + 命名卷是早先用旧镜像建的（属主成了 root）。卷里本来就没数据，删掉重建：\n` +
           `      docker compose down\n` +
           `      docker volume ls | grep registry-manager   # 找到卷名\n` +
           `      docker volume rm <上面那个卷名>\n` +
           `      docker compose up -d\n` +
-          `  · bind mount：宿主机目录属主必须是 uid 1000 ——\n` +
-          `      sudo chown -R 1000:1000 ./data\n` +
+          `  · bind mount 已挂载但不可写：宿主机目录属主改成 uid 1000 ——\n` +
+          `      sudo chown -R 1000:1000 /宿主机/目录\n` +
           `  · 只想先跑起来（不持久化）：加 -e REGISTRY_CREDENTIALS_DIR=/tmp/registry-manager-data`
       );
     }
