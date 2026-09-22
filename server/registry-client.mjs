@@ -288,8 +288,12 @@ export class RegistryClient {
       headers.Authorization = `Bearer ${cachedToken}`;
     }
 
+    // path 可能是绝对 URL（来自跨源的 Location 头），此时必须原样使用，
+    // 不能再拼 baseUrl，否则会拼出畸形地址。
+    const requestUrl = /^https?:\/\//i.test(path) ? path : `${this.baseUrl}${path}`;
+
     const send = (overrideHeaders) =>
-      undiciFetch(`${this.baseUrl}${path}`, {
+      undiciFetch(requestUrl, {
         method,
         headers: overrideHeaders,
         redirect,
@@ -843,7 +847,10 @@ export class RegistryClient {
           { status: response.status, detail: distribution.message }
         ).withOrigin('dest');
       }
-      return { bytes: totalWritten, location };
+      // 协议上，收尾要用**最新**的会话地址：registry（或它背后的存储网关）
+      // 可能在 PATCH 响应里给出新的 Location，继续用旧地址会 404。
+      const nextLocation = (response.headers.get('location') ?? '').trim() || location;
+      return { bytes: totalWritten, location: nextLocation };
     } catch (error) {
       if (error instanceof RegistryError && error.code === 'CANCELLED') {
         throw error;
@@ -861,13 +868,36 @@ export class RegistryClient {
     }
   }
 
+  /**
+   * 把可能来自 Location 头的 URL 变成 #request 能用的形式。
+   *
+   * 关键：**不能用字符串替换 baseUrl 去"去前缀"**。
+   * Distribution 在上传走重定向 / 配了 REGISTRY_HTTP_HOST / 用对象存储网关时，
+   * 返回的 Location 可能是**绝对 URL 且主机与配置不同**；那种情况下
+   * `finalUrl.replace(baseUrl,'')` 什么也替不掉，path 会变成完整 URL，
+   * 再被 #request 拼成 `http://basehttp://other/...` 这种畸形地址 → registry 回 404。
+   *
+   * 于是我们出现过"PATCH 成功、PUT 404"这种自相矛盾的现象：
+   * PATCH 用的是 URL 对象（正确），PUT 走的是字符串替换（被拼坏）。
+   */
+  #resolveLocationPath(location) {
+    const url = new URL(location, this.baseUrl);
+    const base = new URL(this.baseUrl);
+    if (url.origin === base.origin) {
+      // 同源 → 只取 path + query，交给 #request 拼 baseUrl
+      return `${url.pathname}${url.search}`;
+    }
+    // 跨源 → 原样返回绝对 URL，#request 会直接用它
+    return url.toString();
+  }
+
   /** 目的端 PUT <Location>?digest=<digest>：结束 monolithic upload。 */
   async putDestUpload(location, digest, { signal } = {}) {
     const url = new URL(location, this.baseUrl);
-    const query = url.searchParams;
-    query.set('digest', digest);
-    const finalUrl = `${url.origin}${url.pathname}?${query.toString()}`;
-    const response = await this.#request('PUT', finalUrl.replace(this.baseUrl, ''), {
+    // 保底：Location 里已有的查询参数（Distribution 会带 _state）必须保留。
+    url.searchParams.set('digest', digest);
+    const target = this.#resolveLocationPath(url.toString());
+    const response = await this.#request('PUT', target, {
       signal,
       redirect: 'manual',
       origin: 'dest',
@@ -877,14 +907,25 @@ export class RegistryClient {
     }
     const distribution = await readDistributionError(response);
     if (response.status === 400 && distribution.code === 'DIGEST_INVALID') {
-      throw new RegistryError('目的上传 digest 校验失败', 'BLOB_UPLOAD_FAILED', {
-        detail: distribution.message,
-      }).withOrigin('dest');
+      throw new RegistryError(
+        '目的上传 digest 校验失败：传到目的端的字节与 manifest 里声明的 digest 不一致。',
+        'BLOB_UPLOAD_FAILED',
+        { status: response.status, detail: distribution.message }
+      ).withOrigin('dest');
+    }
+    if (response.status === 404 || distribution.code === 'BLOB_UPLOAD_UNKNOWN') {
+      throw new RegistryError(
+        `目的端不认识这个上传会话（HTTP 404）：${target}。` +
+          '通常是上传会话建在了 A 主机、而收尾请求打到了 B 主机 —— ' +
+          '请检查 registry 的 REGISTRY_HTTP_HOST 是否与 REGISTRY_URL 一致。',
+        'BLOB_UPLOAD_FAILED',
+        { status: response.status, detail: distribution.message, target }
+      ).withOrigin('dest');
     }
     throw new RegistryError(
-      `目的 PUT 失败: HTTP ${response.status}`,
+      `目的 PUT 失败: HTTP ${response.status}（${target}）`,
       'BLOB_UPLOAD_FAILED',
-      { status: response.status, detail: distribution.message }
+      { status: response.status, detail: distribution.message, target }
     ).withOrigin('dest');
   }
 

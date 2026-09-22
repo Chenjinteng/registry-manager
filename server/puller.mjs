@@ -395,7 +395,9 @@ class PullJobRunner {
     if (phase.totalBytes == null) {
       phase.totalBytes = result.bytes;
     }
-    await this.destClient.putDestUpload(upload.location, digest, { signal: this.signal });
+    await this.destClient.putDestUpload(result.location || upload.location, digest, {
+      signal: this.signal,
+    });
   }
 }
 

@@ -274,6 +274,20 @@ docker push 192.0.2.10:10001/example/registry-manager:0.2.0
   "删除不立即释放磁盘" 的约定），交给 `registry garbage-collect` 兜底。
 - 任务只存内存，重启即丢；这是刻意的 —— 与现有清单缓存一致，避免引入持久化依赖。
 
+### 上传会话的 Location 可能指向别的主机
+
+Distribution 在上传走重定向、配了 `REGISTRY_HTTP_HOST`、或使用对象存储网关时，
+`POST /blobs/uploads/` 返回的 `Location` 会是**绝对 URL，且主机与 `REGISTRY_URL` 不同**。
+
+早期实现用 `finalUrl.replace(baseUrl, '')` 去前缀，跨源时什么都替不掉，path 变成完整
+URL，再被拼成 `http://basehttp://other/...` 这种畸形地址 —— 表现为
+**「manifest 已读取，但目的 PUT 404」**这种自相矛盾的现象（因为 PATCH 用的是 URL 对象，
+是正确的；只有 PUT 走字符串替换被拼坏了）。
+
+现在：跨源 Location 原样使用、同源只取 path+query，并且收尾一律用 PATCH 响应里
+**最新**的 Location（而非最初那个）。若你确实遇到 PUT 404，报错里会带上实际请求的
+URL，并提示检查 registry 的 `REGISTRY_HTTP_HOST` 是否与 `REGISTRY_URL` 一致。
+
 ### 创建前的预检
 
 点「确认入队」前会先弹预览，并真的做两次只读探测：
