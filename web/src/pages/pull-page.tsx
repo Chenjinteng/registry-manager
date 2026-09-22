@@ -72,6 +72,56 @@ function defaultDestRepoFromRef(ref: string): string {
   return candidate.replace(/^\/+/, '').trim();
 }
 
+/**
+ * 失败 / 取消的任务行默认展开，方便用户直接看到错误原因。
+ */
+function defaultExpandedKeys(jobs: PullJob[]): string[] {
+  return jobs.filter((j) => j.status === 'failed' || j.status === 'cancelled').map((j) => j.id);
+}
+
+/**
+ * 把后端稳定的 code 翻译成一句"运维能直接照做"的提示。
+ * 摘要放在表格行内，全文在展开区；这里只保留一句最重要的根因。
+ */
+function failureHint(job: PullJob): string {
+  const code = job.errorCode ?? '';
+  switch (code) {
+    case 'SOURCE_UNREACHABLE':
+    case 'CONNECTION_FAILED':
+      return '源 registry 连不上，请检查地址 / 代理';
+    case 'SOURCE_UNAUTHORIZED':
+      return '源 registry 要求认证，本工具不支持';
+    case 'SOURCE_MANIFEST_NOT_FOUND':
+      return '源镜像 / tag 不存在';
+    case 'SOURCE_BLOB_NOT_FOUND':
+      return '源 blob 缺失，镜像不完整';
+    case 'SOURCE_HTTP_FAILED':
+      return '源 registry 响应异常';
+    case 'SOURCE_MANIFEST_INVALID':
+      return '源 manifest 解析失败';
+    case 'INVALID_URL':
+    case 'INVALID_REQUEST':
+      return '输入参数不合法';
+    case 'DEST_FORBIDDEN':
+      return '目的 registry 拒绝写入';
+    case 'BLOB_UPLOAD_FAILED':
+    case 'BLOB_MOUNT_FAILED':
+    case 'BLOB_UPLOAD_INIT_FAILED':
+      return '目的 blob 上传失败';
+    case 'MANIFEST_PUT_FAILED':
+      return '目的 manifest 落库失败';
+    case 'CANCELLED':
+      return '已取消';
+    case 'JOB_NOT_FOUND':
+      return '任务不存在';
+    case 'PULL_DISABLED':
+      return '服务端禁止拉取（allowPull=false）';
+    default:
+      // 没识别出来的 code：把后端原始 message 兜底展示。
+      return job.errorMessage ?? '失败原因未知';
+  }
+}
+
 const STATUS_META: Record<
   PullJobStatus,
   { label: string; color: string; icon: React.ReactNode }
@@ -237,13 +287,23 @@ export default function PullPage({ config }: Props) {
     {
       title: '状态',
       key: 'status',
-      width: 110,
+      width: 200,
       render: (_, job) => {
         const meta = STATUS_META[job.status];
+        const failureReason = job.errorMessage ? failureHint(job) : null;
         return (
-          <Tag color={meta.color} icon={meta.icon}>
-            {meta.label}
-          </Tag>
+          <Space direction="vertical" size={2} style={{ lineHeight: 1.3 }}>
+            <Tag color={meta.color} icon={meta.icon} style={{ margin: 0 }}>
+              {meta.label}
+            </Tag>
+            {failureReason ? (
+              <Tooltip title={failureReason}>
+                <span style={{ fontSize: 12, color: 'var(--color-text-3)' }} className="ellipsis">
+                  {failureReason}
+                </span>
+              </Tooltip>
+            ) : null}
+          </Space>
         );
       },
     },
@@ -491,6 +551,8 @@ export default function PullPage({ config }: Props) {
           expandable={{
             expandedRowRender: (job) => <JobPhases job={job} />,
             rowExpandable: (job) => job.status === 'failed' || job.status === 'cancelled',
+            defaultExpandAllRows: false,
+            expandedRowKeys: defaultExpandedKeys(jobs),
           }}
           locale={{
             emptyText: (
@@ -563,21 +625,40 @@ function JobPhases({ job }: { job: PullJob }) {
               : ''}
           </span>
           {phase.message ? (
-            <span style={{ color: 'var(--color-text-3)', fontSize: 12 }}>{phase.message}</span>
+            <span
+              style={{
+                fontSize: 12,
+                color: phase.status === 'failed' ? 'var(--color-error)' : 'var(--color-text-3)',
+              }}
+            >
+              {phase.message}
+            </span>
           ) : null}
         </div>
       ))}
       {job.errorMessage ? (
-        <div className="pull-phase-row" style={{ color: 'var(--color-text-3)' }}>
-          <Tag color="error">错误</Tag>
+        <div
+          className="pull-phase-row"
+          style={{ color: 'var(--color-error)', background: 'var(--color-error-bg)' }}
+        >
+          <Tag color="error">失败</Tag>
           <span style={{ fontSize: 12 }}>
-            {job.errorCode ? `${job.errorCode}：` : ''}
-            {job.errorMessage}
+            {failedPhaseLabel(job)}
+            {job.errorCode ? ` · ${job.errorCode}` : ''}：{job.errorMessage}
           </span>
         </div>
       ) : null}
     </div>
   );
+}
+
+/** 找到失败时正在跑的 phase，用它来定位失败发生在哪一步。 */
+function failedPhaseLabel(job: PullJob): string {
+  const failed = job.phases.find((p) => p.status === 'failed');
+  if (!failed) {
+    return '';
+  }
+  return phaseLabel(failed);
 }
 
 function phaseLabel(phase: PullPhase): string {
