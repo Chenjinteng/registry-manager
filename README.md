@@ -9,11 +9,16 @@
 - **镜像列表**：搜索仓库名、按体积或构建时间排序。
 - **镜像详情**：每个 tag 的 digest、架构与操作系统、层数、体积、构建时间，一键复制 `docker pull` 命令。
 - **删除镜像**：按 manifest digest 删除。删除前会列出同一 digest 下的全部 tag，并说明磁盘空间不会立即释放。
-- **镜像拉取**：从外部 registry 拉取镜像落到本仓库，单并发 + FIFO 队列，支持任务级来源代理，优雅取消。
+- **镜像拉取**：从外部 registry 拉取镜像落到本仓库，单并发 + FIFO 队列，优雅取消；
+  支持公共源（Docker Hub / ghcr / quay 等，匿名即可拉公开镜像）与私有源。
+- **凭据管理**：外部源的 basic auth 凭据库，加密落盘，密码不回显。
+- **代理管理**：外部源的 HTTP 代理库，支持连通性测试。
 - **清单概览**：仓库数、tag 数、镜像层合计、清单刷新时间，以及读取失败的 tag 明细。
 - **连接自检**：一键测试 registry 连通性与 API 版本。
 
 没有登录、没有数据库。清单在内存里缓存，重启即重新扫描。
+
+版本变更见 [CHANGELOG.md](./CHANGELOG.md)；版本号规则见 [AGENTS.md](./AGENTS.md#版本号规则)。
 
 ## 为什么需要一个服务端
 
@@ -85,7 +90,7 @@ docker compose up -d --build
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 凭据文件目录 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.2.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.3.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -96,7 +101,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.2.0 .
+docker build -t registry-manager:0.3.0 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -104,7 +109,7 @@ docker build -t registry-manager:0.2.0 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.2.0 .
+  -t registry-manager:0.3.0 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -115,7 +120,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.2.0 .
+  -t registry-manager:0.3.0 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -131,7 +136,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.2.0
+  registry-manager:0.3.0
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -157,8 +162,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.2.0 192.0.2.10:10001/example/registry-manager:0.2.0
-docker push 192.0.2.10:10001/example/registry-manager:0.2.0
+docker tag registry-manager:0.3.0 192.0.2.10:10001/example/registry-manager:0.3.0
+docker push 192.0.2.10:10001/example/registry-manager:0.3.0
 ```
 
 ### 镜像内置
