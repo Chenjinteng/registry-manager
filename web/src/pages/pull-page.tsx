@@ -10,6 +10,8 @@ import {
   Input,
   Modal,
   Progress,
+  Radio,
+  Select,
   Space,
   Table,
   Tag,
@@ -32,6 +34,7 @@ import {
   cancelPullJob,
   createPullJob,
   fetchConfig,
+  listCredentials,
   listPullJobs,
   probePullSource,
   removePullJob,
@@ -39,6 +42,7 @@ import {
 import type {
   ApiResult,
   AppConfig,
+  Credential,
   PullJob,
   PullJobInput,
   PullJobStatus,
@@ -56,6 +60,12 @@ interface FormValues {
   destTag?: string;
   sourceUrl?: string;  // 高级选项：留空时由 image 自动推断
   sourceProxy?: string; // 高级选项：本任务的来源代理
+  sourceAuthMode?: 'none' | 'credential' | 'temp';
+  sourceCredentialId?: string;
+  sourceTempUsername?: string;
+  sourceTempPassword?: string;
+  destAuthMode?: 'none' | 'credential';
+  destCredentialId?: string;
 }
 
 const POLL_INTERVAL_MS = 1500;
@@ -80,6 +90,12 @@ function defaultDestRepoFromRef(ref: string): string {
  */
 function defaultExpandedKeys(jobs: PullJob[]): string[] {
   return jobs.filter((j) => j.status === 'failed' || j.status === 'cancelled').map((j) => j.id);
+}
+
+/** 把凭据 id 翻译成「名称（账号）」以供预览/列表展示。 */
+function resolveCredentialLabel(id: string, list: Credential[] = []): string {
+  const c = list.find((x) => x.id === id);
+  return c ? `${c.name}（${c.username}）` : id;
 }
 
 /**
@@ -151,8 +167,27 @@ export default function PullPage({ config }: Props) {
   const [submitting, setSubmitting] = useState(false);
   /** 创建前的预览：表单点击"加入队列"后打开 Modal 确认 + 源预检。 */
   const [pendingInput, setPendingInput] = useState<PullJobInput | null>(null);
+  const [credentials, setCredentials] = useState<Credential[]>([]);
   const liveConfigRef = useRef<AppConfig | null>(config);
   liveConfigRef.current = config;
+
+  // 凭据库可用时拉一次；不可用不请求（listCredentials 仍能调，但服务端会返 CREDENTIAL_KEY_MISSING）。
+  const refreshCredentials = useCallback(async () => {
+    if (!liveConfigRef.current?.allowCredentials) {
+      setCredentials([]);
+      return;
+    }
+    const result = await listCredentials();
+    if (result.success && result.data) {
+      setCredentials(result.data);
+    } else {
+      setCredentials([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCredentials();
+  }, [refreshCredentials]);
 
   const refresh = useCallback(async () => {
     const result = await listPullJobs();
@@ -214,6 +249,25 @@ export default function PullPage({ config }: Props) {
     // destRepo：留空沿用源 repo；用户在表里可显式改成别的。
     const destRepo = values.destRepo?.trim() || defaultDestRepoFromRef(sourceRefEffective);
 
+    // 源端认证：credential / temp / none。
+    let sourceCredentialId: string | undefined;
+    let sourceAuthInline: { username: string; password: string } | undefined;
+    if (values.sourceAuthMode === 'credential' && values.sourceCredentialId) {
+      sourceCredentialId = values.sourceCredentialId;
+    } else if (values.sourceAuthMode === 'temp') {
+      const u = values.sourceTempUsername?.trim();
+      const p = values.sourceTempPassword ?? '';
+      if (u && p) {
+        sourceAuthInline = { username: u, password: p };
+      }
+    }
+
+    // 目的端认证：只允许从凭据库选；不允许临时输入（目的端是本仓库，临时输入容易被误用）。
+    const destCredentialId =
+      values.destAuthMode === 'credential' && values.destCredentialId
+        ? values.destCredentialId
+        : undefined;
+
     // 打开预览 Modal，让用户看清将要做什么 + 源端预检，再真正入队。
     setPendingInput({
       sourceUrl: sourceUrlEffective,
@@ -221,6 +275,9 @@ export default function PullPage({ config }: Props) {
       destRepo,
       destTag: values.destTag?.trim() || undefined,
       sourceProxy: values.sourceProxy?.trim() || undefined,
+      sourceCredentialId,
+      destCredentialId,
+      sourceAuthInline,
     });
   };
 
@@ -464,38 +521,175 @@ export default function PullPage({ config }: Props) {
             items={[
               {
                 key: 'advanced',
-                label: '高级选项（来源地址 / 来源代理）',
+                label: '高级选项（来源地址 / 来源代理 / 认证）',
                 children: (
-                  <div className="pull-form-grid">
+                  <>
+                    <div className="pull-form-grid">
+                      <Form.Item
+                        label="来源 registry 地址"
+                        extra="留空时按镜像名前缀自动推断：含主机段则用该主机；否则默认 Docker Hub。"
+                        rules={[
+                          {
+                            validator: (_, value: string | undefined) =>
+                              !value || /^https?:\/\//i.test(value.trim())
+                                ? Promise.resolve()
+                                : Promise.reject(new Error('需要以 http:// 或 https:// 开头')),
+                          },
+                        ]}
+                      >
+                        <Input placeholder="自动推断" allowClear />
+                      </Form.Item>
+                      <Form.Item
+                        label="来源代理（可选）"
+                        extra="仅作用于本次任务的源端；目的端走服务配置的代理。"
+                        rules={[
+                          {
+                            validator: (_, value: string | undefined) =>
+                              !value || /^https?:\/\//i.test(value.trim())
+                                ? Promise.resolve()
+                                : Promise.reject(new Error('需要以 http:// 或 https:// 开头')),
+                          },
+                        ]}
+                      >
+                        <Input placeholder="http://proxy.example.com:8080" allowClear />
+                      </Form.Item>
+                    </div>
+
                     <Form.Item
-                      label="来源 registry 地址"
-                      extra="留空时按镜像名前缀自动推断：含主机段则用该主机；否则默认 Docker Hub。"
-                      rules={[
-                        {
-                          validator: (_, value: string | undefined) =>
-                            !value || /^https?:\/\//i.test(value.trim())
-                              ? Promise.resolve()
-                              : Promise.reject(new Error('需要以 http:// 或 https:// 开头')),
-                        },
-                      ]}
+                      label="源认证"
+                      extra={
+                        config?.allowCredentials
+                          ? '凭据库由「凭据管理」维护；临时输入不会落盘。'
+                          : '凭据库未配置，只能临时输入账号 / 密码（不会落盘）。'
+                      }
                     >
-                      <Input placeholder="自动推断" allowClear />
+                      <Input.Group compact>
+                        <Form.Item name="sourceAuthMode" noStyle initialValue="none">
+                          <Radio.Group
+                            optionType="button"
+                            buttonStyle="solid"
+                            onChange={() => form.resetFields(['sourceCredentialId'])}
+                          >
+                            <Radio.Button value="none">不用</Radio.Button>
+                            <Radio.Button value="credential">凭据库</Radio.Button>
+                            <Radio.Button value="temp">临时输入</Radio.Button>
+                          </Radio.Group>
+                        </Form.Item>
+                      </Input.Group>
                     </Form.Item>
+
                     <Form.Item
-                      label="来源代理（可选）"
-                      extra="仅作用于本次任务的源端；目的端走服务配置的代理。"
-                      rules={[
-                        {
-                          validator: (_, value: string | undefined) =>
-                            !value || /^https?:\/\//i.test(value.trim())
-                              ? Promise.resolve()
-                              : Promise.reject(new Error('需要以 http:// 或 https:// 开头')),
-                        },
-                      ]}
+                      noStyle
+                      shouldUpdate={(prev, current) =>
+                        prev.sourceAuthMode !== current.sourceAuthMode
+                      }
                     >
-                      <Input placeholder="http://proxy.example.com:8080" allowClear />
+                      {({ getFieldValue }) => {
+                        const mode = getFieldValue('sourceAuthMode');
+                        if (mode === 'credential') {
+                          const sourceCandidates = credentials.filter(
+                            (c) => c.purpose === 'source' || c.purpose === 'both'
+                          );
+                          return (
+                            <Form.Item
+                              label="选择源凭据"
+                              name="sourceCredentialId"
+                              rules={[
+                                { required: true, message: '请选择一条凭据' },
+                              ]}
+                            >
+                              <Select
+                                placeholder={
+                                  sourceCandidates.length === 0
+                                    ? '凭据库里没有匹配的源端凭据'
+                                    : '选择凭据'
+                                }
+                                disabled={sourceCandidates.length === 0}
+                                options={sourceCandidates.map((c) => ({
+                                  value: c.id,
+                                  label: `${c.name}（${c.username} @ ${c.registryUrl}）`,
+                                }))}
+                              />
+                            </Form.Item>
+                          );
+                        }
+                        if (mode === 'temp') {
+                          return (
+                            <>
+                              <Form.Item
+                                label="临时账号"
+                                name="sourceTempUsername"
+                                rules={[{ required: true, message: '请填写用户名' }]}
+                              >
+                                <Input autoComplete="off" placeholder="username" />
+                              </Form.Item>
+                              <Form.Item
+                                label="临时密码"
+                                name="sourceTempPassword"
+                                rules={[{ required: true, message: '请填写密码' }]}
+                                extra="只用于本次任务，不会写入凭据库。"
+                              >
+                                <Input.Password
+                                  autoComplete="new-password"
+                                  placeholder="••••••"
+                                />
+                              </Form.Item>
+                            </>
+                          );
+                        }
+                        return null;
+                      }}
                     </Form.Item>
-                  </div>
+
+                    <Form.Item
+                      label="目的认证"
+                      extra="目的端是当前管理的 registry。允许从凭据库选；不允许临时输入。"
+                    >
+                      <Input.Group compact>
+                        <Form.Item name="destAuthMode" noStyle initialValue="none">
+                          <Radio.Group optionType="button" buttonStyle="solid">
+                            <Radio.Button value="none">不用</Radio.Button>
+                            <Radio.Button value="credential">凭据库</Radio.Button>
+                          </Radio.Group>
+                        </Form.Item>
+                      </Input.Group>
+                    </Form.Item>
+
+                    <Form.Item
+                      noStyle
+                      shouldUpdate={(prev, current) =>
+                        prev.destAuthMode !== current.destAuthMode
+                      }
+                    >
+                      {({ getFieldValue }) => {
+                        const mode = getFieldValue('destAuthMode');
+                        if (mode !== 'credential') return null;
+                        const destCandidates = credentials.filter(
+                          (c) => c.purpose === 'dest' || c.purpose === 'both'
+                        );
+                        return (
+                          <Form.Item
+                            label="选择目的凭据"
+                            name="destCredentialId"
+                            rules={[{ required: true, message: '请选择一条凭据' }]}
+                          >
+                            <Select
+                              placeholder={
+                                destCandidates.length === 0
+                                  ? '凭据库里没有匹配的目的端凭据'
+                                  : '选择凭据'
+                              }
+                              disabled={destCandidates.length === 0}
+                              options={destCandidates.map((c) => ({
+                                value: c.id,
+                                label: `${c.name}（${c.username} @ ${c.registryUrl}）`,
+                              }))}
+                            />
+                          </Form.Item>
+                        );
+                      }}
+                    </Form.Item>
+                  </>
                 ),
               },
             ]}
@@ -587,6 +781,7 @@ export default function PullPage({ config }: Props) {
 
       <PullPreviewModal
         input={pendingInput}
+        credentials={credentials}
         onConfirm={handleConfirmCreate}
         onCancel={handleCancelPreview}
         submitting={submitting}
@@ -604,11 +799,13 @@ export default function PullPage({ config }: Props) {
  */
 function PullPreviewModal({
   input,
+  credentials,
   onConfirm,
   onCancel,
   submitting,
 }: {
   input: PullJobInput | null;
+  credentials: Credential[];
   onConfirm: () => void;
   onCancel: () => void;
   submitting: boolean;
@@ -628,7 +825,11 @@ function PullPreviewModal({
     }
     let cancelled = false;
     setProbeResult({ state: 'loading' });
-    probePullSource({ sourceUrl: input.sourceUrl, sourceProxy: input.sourceProxy })
+    probePullSource({
+        sourceUrl: input.sourceUrl,
+        sourceProxy: input.sourceProxy,
+        credentialId: input.sourceCredentialId,
+      })
       .then((result) => {
         if (cancelled) return;
         if (result.success && result.data) {
@@ -672,11 +873,23 @@ function PullPreviewModal({
               <span className="mono">{input.sourceUrl}</span>
               {input.sourceProxy ? <Tag color="gold" style={{ marginLeft: 8 }}>来源代理</Tag> : null}
             </Descriptions.Item>
+            <Descriptions.Item label="源认证">
+              {input.sourceCredentialId
+                ? `${resolveCredentialLabel(input.sourceCredentialId, credentials)}（凭据库）`
+                : input.sourceAuthInline
+                ? `临时账号 ${input.sourceAuthInline.username}（不保存）`
+                : '不使用'}
+            </Descriptions.Item>
             <Descriptions.Item label="源镜像">
               <span className="mono">{input.sourceRef}</span>
             </Descriptions.Item>
             <Descriptions.Item label="目的仓库">
               <span className="mono">{input.destRepo}:{input.destTag}</span>
+            </Descriptions.Item>
+            <Descriptions.Item label="目的认证">
+              {input.destCredentialId
+                ? `${resolveCredentialLabel(input.destCredentialId, credentials)}（凭据库）`
+                : '不使用'}
             </Descriptions.Item>
             <Descriptions.Item label="目的端">
               <span style={{ color: 'var(--color-text-3)' }}>

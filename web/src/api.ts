@@ -1,6 +1,9 @@
 import type {
   ApiResult,
   AppConfig,
+  Credential,
+  CredentialInput,
+  CredentialPatch,
   DeleteTagPayload,
   Inventory,
   PullJob,
@@ -63,8 +66,35 @@ export const cancelPullJob = (id: string) =>
 export const removePullJob = (id: string) =>
   request<{ id: string }>(`/api/pull/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
 
-export const probePullSource = (input: { sourceUrl: string; sourceProxy?: string }) =>
+export const probePullSource = (input: {
+  sourceUrl: string;
+  sourceProxy?: string;
+  credentialId?: string;
+}) =>
   request<{ apiVersion: string; host: string; sourceUrl: string; usingProxy: boolean }>(
     '/api/pull/probe',
     { method: 'POST', body: JSON.stringify(input) }
+  );
+
+export const listCredentials = () => request<Credential[]>('/api/credentials');
+
+export const getCredential = (id: string) =>
+  request<Credential>(`/api/credentials/${encodeURIComponent(id)}`);
+
+export const createCredential = (input: CredentialInput) =>
+  request<Credential>('/api/credentials', { method: 'POST', body: JSON.stringify(input) });
+
+export const updateCredential = (id: string, patch: CredentialPatch) =>
+  request<Credential>(`/api/credentials/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+
+export const deleteCredential = (id: string) =>
+  request<{ id: string }>(`/api/credentials/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
+export const testCredential = (id: string) =>
+  request<{ apiVersion: string; host: string; registryUrl: string; purpose: string }>(
+    `/api/credentials/${encodeURIComponent(id)}/test`,
+    { method: 'POST' }
   );

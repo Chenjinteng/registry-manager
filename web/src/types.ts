@@ -45,6 +45,9 @@ export interface AppConfig {
   /** false 时服务端拒绝一切拉取写入（GET 列表仍可读）。 */
   allowPull: boolean;
   pullQueueSize: number;
+  /** false 时服务端没配密钥，凭据库不可用。 */
+  allowCredentials: boolean;
+  credentialsDir: string;
 }
 
 export interface ApiResult<T> {
@@ -94,6 +97,8 @@ export interface PullJob {
   errorMessage?: string;
   /** 'source' | 'dest' | undefined。区分错误发生在源还是目的端。 */
   errorOrigin?: 'source' | 'dest';
+  sourceCredentialId?: string;
+  destCredentialId?: string;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
@@ -105,4 +110,43 @@ export interface PullJobInput {
   sourceProxy?: string;
   destRepo: string;
   destTag?: string;
+  sourceCredentialId?: string;
+  destCredentialId?: string;
+  /** 临时 inline 凭据：不落库，仅当次任务使用。 */
+  sourceAuthInline?: { username: string; password: string };
+  destAuthInline?: { username: string; password: string };
+}
+
+export type CredentialPurpose = 'source' | 'dest' | 'both';
+
+export interface Credential {
+  id: string;
+  name: string;
+  registryUrl: string;
+  purpose: CredentialPurpose;
+  username: string;
+  /** 是否设置过密码；密码本身不会回传到前端。 */
+  hasPassword: boolean;
+  note?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CredentialInput {
+  name: string;
+  registryUrl: string;
+  username: string;
+  password: string;
+  purpose: CredentialPurpose;
+  note?: string;
+}
+
+export interface CredentialPatch {
+  name?: string;
+  registryUrl?: string;
+  username?: string;
+  /** 传空字符串视为不更新密码；省略同空。 */
+  password?: string;
+  purpose?: CredentialPurpose;
+  note?: string;
 }
