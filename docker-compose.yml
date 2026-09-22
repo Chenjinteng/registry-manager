@@ -38,6 +38,9 @@ services:
       REGISTRY_ALLOW_PULL: ${REGISTRY_ALLOW_PULL:-true}
       # 内存里保留的最近任务数；重启即丢
       REGISTRY_PULL_QUEUE_SIZE: ${REGISTRY_PULL_QUEUE_SIZE:-50}
+      # 凭据库：加密 JSON 落盘；必填密钥，否则凭据库不可用（拉取仍可匿名工作）
+      REGISTRY_CREDENTIAL_KEY: ${REGISTRY_CREDENTIAL_KEY:?请设置 REGISTRY_CREDENTIAL_KEY；任意随机 32+ 字符字符串，启动后切勿丢失}
+      REGISTRY_CREDENTIALS_DIR: ${REGISTRY_CREDENTIALS_DIR:-/app/data}
 
     # 健康检查继承自镜像（Dockerfile 里的 HEALTHCHECK，探 /api/config），
     # 这里不重复声明，避免两处漂移。

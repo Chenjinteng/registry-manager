@@ -40,6 +40,17 @@ pnpm build     # 产出 web/dist
 pnpm start     # 单进程同时提供页面与 /api，默认 http://127.0.0.1:8787
 ```
 
+### 验证
+
+```bash
+pnpm type-check   # 前端类型
+pnpm verify       # 非破坏性回归：认证头 + 双端认证的完整拉取
+```
+
+`pnpm verify` 会起两个进程内的 mock registry（要求 Basic auth），用真实的
+`PullQueue` 跑一次完整拉取，断言认证头真的发到了线路上、流式 PATCH 真的到达目的端、
+blob 逐字节一致、manifest 原样落库。**不接触任何真实仓库**，可以随时跑。
+
 ## 容器化
 
 镜像分三阶段：`builder` 装全量依赖并编译前端 → `prod-deps` 只装运行时依赖
@@ -64,6 +75,8 @@ docker compose up -d --build
 | `REGISTRY_ALLOW_DELETE` | `true` | `false` = 只读模式，拒绝所有删除 |
 | `REGISTRY_ALLOW_PULL` | `true` | `false` = 禁止拉取模式，拒绝所有 `/api/pull/*` 写入 |
 | `REGISTRY_PULL_QUEUE_SIZE` | `50` | 内存里保留的最近任务数；超出按创建时间最旧剔除 |
+| `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
+| `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 凭据文件目录 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
 | `IMAGE` | `registry-manager:0.2.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
@@ -168,6 +181,8 @@ docker push 192.0.2.10:10001/example/registry-manager:0.2.0
 | `allowDelete` | `REGISTRY_ALLOW_DELETE` | `true` | 设为 `false` 进入只读模式，服务端拒绝一切删除 |
 | `allowPull` | `REGISTRY_ALLOW_PULL` | `true` | 设为 `false` 后服务端拒绝一切 `/api/pull/*` 写入 |
 | `pullQueueSize` | `REGISTRY_PULL_QUEUE_SIZE` | `50` | 内存里保留的最近任务数；超出按创建时间最旧剔除 |
+| `allowCredentials` | (env 决定) | - | 是否启用凭据库（由 `REGISTRY_CREDENTIAL_KEY` 是否设置决定） |
+| `credentialsDir` | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 凭据文件目录 |
 | `port` | `PORT` | `8787` | 监听端口 |
 
 只有一个 registry：多实例配置属于平台能力，不属于这个工具。
@@ -189,6 +204,12 @@ docker push 192.0.2.10:10001/example/registry-manager:0.2.0
 | GET | `/api/pull/jobs/:id` | 单任务详情（含每个 phase 进度） |
 | POST | `/api/pull/jobs/:id/cancel` | 优雅取消（传输中的 chunk 会写完） |
 | DELETE | `/api/pull/jobs/:id` | 从历史移除（不影响已落库的镜像） |
+| GET | `/api/credentials` | 列出凭据（密码不回显） |
+| GET | `/api/credentials/:id` | 单条凭据详情 |
+| POST | `/api/credentials` | 创建凭据（请求带密码明文） |
+| PATCH | `/api/credentials/:id` | 更新（密码字段省略或空字符串视为不更新） |
+| DELETE | `/api/credentials/:id` | 删除凭据 |
+| POST | `/api/credentials/:id/test` | 用此凭据打一次 `GET /v2/`，验证可达性 |
 
 ## 规模与边界
 
@@ -235,3 +256,23 @@ docker push 192.0.2.10:10001/example/registry-manager:0.2.0
 
 `allowPull: false`（环境变量 `REGISTRY_ALLOW_PULL=false`）可以一键关闭写入，
 GET 列表仍可读，便于运维查看历史任务。
+
+### 凭据管理（私有 registry 认证）
+
+页面顶部多了 `凭据管理` 页签。源 / 目的端都可以从凭据库选 basic auth，
+也能在任务表单里临时输入账号密码（**不写入凭据库**）。
+
+凭据库本身是 AES-256-GCM 加密的 JSON 文件，路径默认 `/app/data/credentials.json`
+（建议在 compose 里挂卷持久化）。密钥走环境变量 `REGISTRY_CREDENTIAL_KEY`，
+scrypt 派生；密钥与文件**同时丢失 = 凭据永久不可恢复**，运维备份时务必一起带走。
+
+启动时如果没设置 `REGISTRY_CREDENTIAL_KEY`，服务仍可启动并支持匿名拉取，
+但凭据管理页会显示警告、相关 API 返回 `CREDENTIAL_KEY_MISSING`。
+
+任务表单里两个相关字段：
+
+- **源认证**：从凭据库选 / 临时输入账号密码 / 不使用；
+- **目的认证**：从凭据库选 / 不使用（不允许临时输入，避免误把别人的密码落到本仓库）。
+
+临时输入模式下，预览 Modal 不会做认证连通测试（密码不在凭据库、服务端拿不到）；
+但任务真正开始时会带上账号密码去连源。
