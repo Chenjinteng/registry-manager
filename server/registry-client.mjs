@@ -5,6 +5,7 @@
  * 每个失败都带稳定 code，让页面能区分"地址不可达""删除未开启""镜像不存在"。
  */
 import { ProxyAgent, fetch as undiciFetch } from 'undici';
+import { Readable, Transform } from 'node:stream';
 
 // 一次可接受的 manifest 类型；顺序即服务端优先级。
 const MANIFEST_ACCEPT = [
@@ -13,6 +14,10 @@ const MANIFEST_ACCEPT = [
   'application/vnd.oci.image.manifest.v1+json',
   'application/vnd.docker.distribution.manifest.v2+json',
 ].join(', ');
+
+// 流式复制用的空闲超时：超过这个时间没有新字节就放弃本次拉取。
+// 不放整体超时 —— 镜像几 GB 整体耗时可能很长，但长时间一片死寂通常说明对端断流。
+const BLOB_IDLE_TIMEOUT_MS = 60_000;
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -63,9 +68,26 @@ export class RegistryClient {
     return this.baseUrl.replace(/^https?:\/\//i, '');
   }
 
-  async #request(method, path, { accept = '', timeoutMs, redirect = 'follow' } = {}) {
+  /**
+   * 单次 HTTP 出口。所有上层方法都走这里。
+   *
+   * - `signal` 由调用方持有（典型用法：把它绑给一个 PullJob 的 AbortController）。
+   *   PullJob 取消时 controller.abort() 会让所有正在路上的请求立即终止。
+   * - `dispatcher` 不传时用实例默认（通常是访问本仓库的代理）。
+   *   跨源场景（拉外部镜像）调用方可以传自己的 dispatcher 走另一个代理。
+   */
+  async #request(method, path, { accept = '', timeoutMs, redirect = 'follow', signal, dispatcher } = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs ?? this.timeoutMs);
+    // 串联外部 signal：调用方取消 → 我们的 controller 也 abort。
+    const onAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) {
+        controller.abort();
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }
     const headers = { 'Cache-Control': 'no-cache' };
     if (accept) {
       headers.Accept = accept;
@@ -76,13 +98,16 @@ export class RegistryClient {
         headers,
         redirect,
         signal: controller.signal,
-        dispatcher: this.dispatcher,
+        dispatcher: dispatcher ?? this.dispatcher,
       });
     } catch (error) {
-      const reason = error?.name === 'AbortError' ? '请求超时' : '无法连接到镜像仓库';
+      const reason = error?.name === 'AbortError' ? '请求被取消' : '无法连接到镜像仓库';
       throw new RegistryError(reason, 'CONNECTION_FAILED', { detail: String(error?.message ?? error) });
     } finally {
       clearTimeout(timer);
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
     }
   }
 
@@ -105,8 +130,8 @@ export class RegistryClient {
     }
     const status = response.status;
     const distribution = await readDistributionError(response);
-    if (status === 401) {
-      throw new RegistryError('镜像仓库要求认证，本工具未配置凭据', 'UNAUTHORIZED');
+    if (status === 401 || status === 403) {
+      throw new RegistryError(`${what}需要认证或被拒绝（HTTP ${status}）`, 'UNAUTHORIZED', { status });
     }
     if (status === 404) {
       throw new RegistryError(`${what}不存在`, notFoundCode, notFoundParams);
@@ -135,8 +160,8 @@ export class RegistryClient {
     });
   }
 
-  async #getJson(path, { accept = '', notFoundCode, notFoundParams, what, redirect } = {}) {
-    const response = await this.#request('GET', path, { accept, redirect });
+  async #getJson(path, { accept = '', notFoundCode, notFoundParams, what, redirect, signal, dispatcher } = {}) {
+    const response = await this.#request('GET', path, { accept, redirect, signal, dispatcher });
     await this.#raiseForStatus(response, { notFoundCode, notFoundParams, what });
     return {
       payload: await this.#readJson(response),
@@ -235,5 +260,362 @@ export class RegistryClient {
       notFoundParams: { reference: `${repository}@${digest}` },
       what: `${repository} 的 manifest`,
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // 镜像拉取相关：扩展方法，构造时传入的 dispatcher 仍然可用。
+  //
+  // 设计要点：
+  // - 拉取源可能在另一个网络域，需要独立 dispatcher / proxy；
+  // - 所有方法都接 signal，绑定到 PullJob 的 AbortController；
+  // - 这组方法只在本仓库与源都是 Distribution 时可用，不做兼容层。
+  // -----------------------------------------------------------------------
+
+  /** 源端 HEAD /v2/<repo>/manifests/<ref>：拿 mediaType 与 docker-content-digest。 */
+  async headSourceManifest(repository, reference, { signal, dispatcher } = {}) {
+    const response = await this.#request('HEAD', `/v2/${repository}/manifests/${reference}`, {
+      accept: MANIFEST_ACCEPT,
+      redirect: 'follow',
+      signal,
+      dispatcher,
+    });
+    if (response.status === 404) {
+      throw new RegistryError(
+        `${repository}:${reference} 的 manifest 不存在`,
+        'SOURCE_MANIFEST_NOT_FOUND',
+        { reference: `${repository}:${reference}` }
+      );
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new RegistryError('源 registry 要求认证，本工具未配置凭据', 'SOURCE_UNAUTHORIZED', {
+        status: response.status,
+      });
+    }
+    if (!response.ok) {
+      throw new RegistryError(`读取源 manifest 失败: HTTP ${response.status}`, 'SOURCE_HTTP_FAILED', {
+        status: response.status,
+      });
+    }
+    return {
+      mediaType: (response.headers.get('content-type') ?? '').split(';')[0].trim(),
+      digest: (response.headers.get('docker-content-digest') ?? '').trim(),
+      contentLength: Number(response.headers.get('content-length') ?? '') || null,
+    };
+  }
+
+  /** 源端 GET manifest（不解析，返回字节流以便原样转发给目的端）。 */
+  async fetchSourceManifestBytes(repository, reference, { signal, dispatcher } = {}) {
+    const response = await this.#request('GET', `/v2/${repository}/manifests/${reference}`, {
+      accept: MANIFEST_ACCEPT,
+      redirect: 'follow',
+      signal,
+      dispatcher,
+    });
+    if (response.status === 404) {
+      throw new RegistryError(
+        `${repository}:${reference} 的 manifest 不存在`,
+        'SOURCE_MANIFEST_NOT_FOUND',
+        { reference: `${repository}:${reference}` }
+      );
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new RegistryError('源 registry 要求认证，本工具未配置凭据', 'SOURCE_UNAUTHORIZED', {
+        status: response.status,
+      });
+    }
+    if (!response.ok) {
+      throw new RegistryError(`读取源 manifest 失败: HTTP ${response.status}`, 'SOURCE_HTTP_FAILED', {
+        status: response.status,
+      });
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    return {
+      mediaType: (response.headers.get('content-type') ?? '').split(';')[0].trim(),
+      digest: (response.headers.get('docker-content-digest') ?? '').trim(),
+      body: Buffer.from(arrayBuffer),
+    };
+  }
+
+  /**
+   * 源端流式读 blob。
+   *
+   * 返回 `{ response, contentLength }`，**调用方负责把 body pipe 到目的端**。
+   * 这样可以避免把几 GB 的镜像吃进 Buffer 再转发。
+   */
+  async openSourceBlob(repository, digest, { signal, dispatcher } = {}) {
+    const response = await this.#request('GET', `/v2/${repository}/blobs/${digest}`, {
+      redirect: 'follow',
+      signal,
+      dispatcher,
+    });
+    if (response.status === 404) {
+      throw new RegistryError(`源 blob ${digest} 不存在`, 'SOURCE_BLOB_NOT_FOUND', { digest });
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new RegistryError('源 registry 要求认证，本工具未配置凭据', 'SOURCE_UNAUTHORIZED', {
+        status: response.status,
+      });
+    }
+    if (!response.ok) {
+      throw new RegistryError(`读取源 blob 失败: HTTP ${response.status}`, 'SOURCE_HTTP_FAILED', {
+        status: response.status,
+        digest,
+      });
+    }
+    return {
+      response,
+      contentLength: Number(response.headers.get('content-length') ?? '') || null,
+    };
+  }
+
+  /**
+   * 目的端尝试 mount 一个已存在的 blob。
+   *
+   * 201 Created → 已挂载（命中）；
+   * 202 Accepted → 源 registry 不允许 / 没开 mount，调用方需回落流式复制。
+   */
+  async mountDestBlob(destRepo, digest, fromRepo, { signal } = {}) {
+    const query = new URLSearchParams({ mount: digest, from: fromRepo });
+    const response = await this.#request(
+      'POST',
+      `/v2/${destRepo}/blobs/uploads/?${query.toString()}`,
+      { redirect: 'manual', signal }
+    );
+    if (response.status === 201) {
+      return { mounted: true };
+    }
+    if (response.status === 202 || response.status === 404 || response.status === 405) {
+      // 202：未挂载但 upload session 创建成功，调用方走流式；
+      // 404/405：mount 接口不支持。
+      // 顺手把 body 读完，避免连接挂着。
+      await response.arrayBuffer().catch(() => {});
+      return { mounted: false };
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new RegistryError(
+        `目的 registry 拒绝写入 ${destRepo}（HTTP ${response.status}）`,
+        'DEST_FORBIDDEN',
+        { status: response.status }
+      );
+    }
+    throw new RegistryError(
+      `目的 mount 失败: HTTP ${response.status}`,
+      'BLOB_MOUNT_FAILED',
+      { status: response.status, digest }
+    );
+  }
+
+  /** 目的端 POST /v2/<repo>/blobs/uploads/：拿 upload session 的 Location。 */
+  async initDestUpload(destRepo, { signal } = {}) {
+    const response = await this.#request('POST', `/v2/${destRepo}/blobs/uploads/`, {
+      redirect: 'manual',
+      signal,
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new RegistryError('目的 registry 拒绝写入', 'DEST_FORBIDDEN', {
+        status: response.status,
+      });
+    }
+    if (response.status !== 202) {
+      throw new RegistryError(
+        `目的上传初始化失败: HTTP ${response.status}`,
+        'BLOB_UPLOAD_INIT_FAILED',
+        { status: response.status }
+      );
+    }
+    const location = response.headers.get('location') || response.headers.get('Location');
+    if (!location) {
+      throw new RegistryError('目的 registry 未返回 Location 头', 'BLOB_UPLOAD_INIT_FAILED');
+    }
+    return { location };
+  }
+
+  /**
+   * 目的端 PATCH 上传 stream：把 `source` 的 body 作为目的端 PATCH 的 body。
+   *
+   * undici 7.x 返回的 `response.body` 是 Web ReadableStream（不是 Node Readable），
+   * 不能直接拿来做 undici PATCH 的 body；也不能 `body.on('data')` 监听数据。
+   * 我们用 Web reader 读取 chunk，每 chunk 推进进度，同时通过一个 Transform 流
+   * 同步推给 PATCH —— 这样源数据**始终在两个连接之间流式搬运**，不经我们进程的内存。
+   *
+   * 取消语义：
+   *   ① `signal.aborted` → 解锁 reader、关掉下游 Transform，PATCH 自然失败；
+   *   ② 但当前正在读 / 写的那个 chunk 会完成（这就是"优雅"的分界点）。
+   */
+  async streamBlobToDest({ location, source, contentLength, signal, onProgress }) {
+    if (!source.body) {
+      throw new RegistryError('源 blob 响应缺少可读 body', 'INVALID_RESPONSE');
+    }
+    // 把 undici 的 Web ReadableStream 转成 Node Readable，
+    // 后面就跟普通流式处理一致：on('data') / pipeline 都很稳。
+    let nodeSource;
+    try {
+      nodeSource = Readable.fromWeb(source.body);
+    } catch (error) {
+      throw new RegistryError('源 blob 无法转为可读流', 'INVALID_RESPONSE', {
+        detail: String(error?.message ?? error),
+      });
+    }
+
+    const url = new URL(location, this.baseUrl);
+    const controller = new AbortController();
+
+    const abortPipeline = () => {
+      // 关掉 controller 让 undici PATCH 失败；同时 destroy 源流以免挂起。
+      controller.abort();
+      nodeSource.destroy();
+    };
+    if (signal) {
+      if (signal.aborted) {
+        abortPipeline();
+      } else {
+        signal.addEventListener('abort', abortPipeline, { once: true });
+      }
+    }
+
+    let idleTimer = null;
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => abortPipeline(), BLOB_IDLE_TIMEOUT_MS);
+    };
+
+    let totalWritten = 0;
+    // Transform：源 → Transform 累加进度 → Transform 输出给 PATCH 作 Node Readable。
+    const passthrough = new Transform({
+      transform(chunk, _enc, callback) {
+        resetIdle();
+        totalWritten += chunk.length;
+        if (typeof onProgress === 'function') {
+          onProgress(totalWritten);
+        }
+        callback(null, chunk);
+      },
+    });
+
+    resetIdle();
+
+    try {
+      // 把 Node 源直接喂进 PATCH；undici 接受 Node Readable 作为 body。
+      const pumpPromise = new Promise((resolve, reject) => {
+        nodeSource.on('error', reject);
+        nodeSource.on('end', resolve);
+        nodeSource.pipe(passthrough);
+      });
+
+      const headers = { 'Content-Type': 'application/octet-stream' };
+      if (contentLength && Number.isFinite(contentLength)) {
+        headers['Content-Length'] = String(contentLength);
+      }
+      const response = await undiciFetch(url, {
+        method: 'PATCH',
+        headers,
+        body: passthrough,
+        signal: controller.signal,
+        dispatcher: this.dispatcher,
+      });
+
+      await pumpPromise;
+
+      if (signal && signal.aborted) {
+        throw new RegistryError('拉取已取消', 'CANCELLED');
+      }
+      if (!response.ok) {
+        const distribution = await readDistributionError(response);
+        throw new RegistryError(
+          `目的 PATCH 失败: HTTP ${response.status}`,
+          'BLOB_UPLOAD_FAILED',
+          { status: response.status, detail: distribution.message }
+        );
+      }
+      return { bytes: totalWritten, location };
+    } catch (error) {
+      if (error instanceof RegistryError && error.code === 'CANCELLED') {
+        throw error;
+      }
+      if (controller.signal.aborted || (signal && signal.aborted)) {
+        throw new RegistryError('拉取已取消', 'CANCELLED');
+      }
+      const reason = error?.name === 'AbortError' ? '目的 PATCH 超时或中断' : '目的 PATCH 失败';
+      throw new RegistryError(reason, 'BLOB_UPLOAD_FAILED', { detail: String(error?.message ?? error) });
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (signal) signal.removeEventListener('abort', abortPipeline);
+    }
+  }
+
+  /** 目的端 PUT <Location>?digest=<digest>：结束 monolithic upload。 */
+  async putDestUpload(location, digest, { signal } = {}) {
+    const url = new URL(location, this.baseUrl);
+    const query = url.searchParams;
+    query.set('digest', digest);
+    const finalUrl = `${url.origin}${url.pathname}?${query.toString()}`;
+    const response = await this.#request('PUT', finalUrl.replace(this.baseUrl, ''), {
+      signal,
+      redirect: 'manual',
+    });
+    if (response.status === 201) {
+      return { finalDigest: (response.headers.get('docker-content-digest') ?? '').trim() || digest };
+    }
+    const distribution = await readDistributionError(response);
+    if (response.status === 400 && distribution.code === 'DIGEST_INVALID') {
+      throw new RegistryError('目的上传 digest 校验失败', 'BLOB_UPLOAD_FAILED', {
+        detail: distribution.message,
+      });
+    }
+    throw new RegistryError(
+      `目的 PUT 失败: HTTP ${response.status}`,
+      'BLOB_UPLOAD_FAILED',
+      { status: response.status, detail: distribution.message }
+    );
+  }
+
+  /** 目的端 PUT /v2/<repo>/manifests/<tag>：落库 manifest。 */
+  async putDestManifest(destRepo, tag, body, contentType, { signal } = {}) {
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) {
+        controller.abort();
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }
+    try {
+      const response = await undiciFetch(`${this.baseUrl}/v2/${destRepo}/manifests/${tag}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': contentType },
+        body,
+        signal: controller.signal,
+        dispatcher: this.dispatcher,
+      });
+      if (response.status === 201) {
+        return {
+          digest: (response.headers.get('docker-content-digest') ?? '').trim() || null,
+        };
+      }
+      const distribution = await readDistributionError(response);
+      if (response.status === 401 || response.status === 403) {
+        throw new RegistryError('目的 registry 拒绝写入 manifest', 'DEST_FORBIDDEN', {
+          status: response.status,
+        });
+      }
+      throw new RegistryError(
+        `目的 manifest PUT 失败: HTTP ${response.status}`,
+        'MANIFEST_PUT_FAILED',
+        { status: response.status, detail: distribution.message }
+      );
+    } catch (error) {
+      if (error instanceof RegistryError) {
+        throw error;
+      }
+      if (controller.signal.aborted || (signal && signal.aborted)) {
+        throw new RegistryError('拉取已取消', 'CANCELLED');
+      }
+      throw new RegistryError('目的 manifest PUT 失败', 'MANIFEST_PUT_FAILED', {
+        detail: String(error?.message ?? error),
+      });
+    } finally {
+      if (signal) signal.removeEventListener('abort', onAbort);
+    }
   }
 }

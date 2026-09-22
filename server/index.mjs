@@ -20,10 +20,12 @@ import express from 'express';
 import { loadConfig } from './config.mjs';
 import { Inventory } from './inventory.mjs';
 import { RegistryClient, RegistryError } from './registry-client.mjs';
+import { PullQueue } from './puller.mjs';
 
 const config = loadConfig();
 const client = new RegistryClient({ url: config.url, proxy: config.proxy });
 const inventory = new Inventory(client, { ttlSeconds: config.cacheTtlSeconds });
+const pullQueue = new PullQueue({ client, historyLimit: config.pullQueueSize });
 
 const app = express();
 app.disable('x-powered-by');
@@ -52,6 +54,8 @@ app.get('/api/config', (req, res) => {
       usingProxy: Boolean(config.proxy),
       cacheTtlSeconds: config.cacheTtlSeconds,
       allowDelete: config.allowDelete,
+      allowPull: config.allowPull,
+      pullQueueSize: config.pullQueueSize,
     },
   });
 });
@@ -135,6 +139,86 @@ app.delete('/api/tags', async (req, res) => {
         repository: refreshed,
       },
     });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 镜像拉取：单并发 + FIFO 队列。allowPull=false 时整组路由拒绝写入（GET 列表仍可读）。
+// ---------------------------------------------------------------------------
+
+function ensurePullAllowed(req, res, next) {
+  // 关闭拉取模式后：GET 列表/详情仍可读，便于查看历史任务；POST/DELETE 一律拒绝。
+  if (config.allowPull || req.method === 'GET') {
+    next();
+    return;
+  }
+  fail(
+    res,
+    new RegistryError(
+      '当前为禁止拉取模式（allowPull=false），已拒绝写入。',
+      'PULL_DISABLED'
+    )
+  );
+}
+
+function readPullJobId(req) {
+  return String(req.params.id ?? '').trim();
+}
+
+app.post('/api/pull/jobs', ensurePullAllowed, async (req, res) => {
+  const body = req.body ?? {};
+  try {
+    const job = pullQueue.enqueue({
+      sourceUrl: String(body.sourceUrl ?? ''),
+      sourceRef: String(body.sourceRef ?? ''),
+      sourceProxy: body.sourceProxy ? String(body.sourceProxy) : '',
+      destRepo: String(body.destRepo ?? ''),
+      destTag: body.destTag ? String(body.destTag) : '',
+    });
+    ok(res, { data: job, message: '已加入队列' });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
+app.get('/api/pull/jobs', (req, res) => {
+  ok(res, { data: pullQueue.list() });
+});
+
+app.get('/api/pull/jobs/:id', (req, res) => {
+  const job = pullQueue.get(readPullJobId(req));
+  if (!job) {
+    fail(res, new RegistryError('任务不存在', 'JOB_NOT_FOUND'));
+    return;
+  }
+  ok(res, { data: job });
+});
+
+app.post('/api/pull/jobs/:id/cancel', ensurePullAllowed, (req, res) => {
+  const id = readPullJobId(req);
+  try {
+    const job = pullQueue.cancel(id);
+    ok(res, {
+      code: 'CANCELLED',
+      message: '已请求取消，传输中的 chunk 会写完再退出',
+      data: job,
+    });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
+app.delete('/api/pull/jobs/:id', ensurePullAllowed, (req, res) => {
+  const id = readPullJobId(req);
+  try {
+    const removed = pullQueue.remove(id);
+    if (!removed) {
+      fail(res, new RegistryError('任务不存在', 'JOB_NOT_FOUND'));
+      return;
+    }
+    ok(res, { data: { id } });
   } catch (error) {
     fail(res, error);
   }

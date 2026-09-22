@@ -18,6 +18,10 @@ const DEFAULTS = {
   cacheTtlSeconds: 60,
   allowDelete: true,
   port: 8787,
+  // 镜像拉取：与"删除"对称的开关，默认开；false 时服务端拒绝所有 /api/pull/* 写入。
+  allowPull: true,
+  // 内存里保留的最近任务数（当前任务 + 等待队列 + 历史）；重启即丢。
+  pullQueueSize: 50,
 };
 
 function readConfigFile() {
@@ -59,6 +63,11 @@ export function loadConfig() {
     ),
     allowDelete: toBoolean(process.env.REGISTRY_ALLOW_DELETE ?? file.allowDelete, DEFAULTS.allowDelete),
     port: toPositiveInt(process.env.PORT || file.port, DEFAULTS.port),
+    allowPull: toBoolean(process.env.REGISTRY_ALLOW_PULL ?? file.allowPull, DEFAULTS.allowPull),
+    pullQueueSize: toPositiveInt(
+      process.env.REGISTRY_PULL_QUEUE_SIZE || file.pullQueueSize,
+      DEFAULTS.pullQueueSize
+    ),
   };
 
   if (!config.url) {
