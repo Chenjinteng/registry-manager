@@ -130,7 +130,7 @@ Linux 上用宿主机在 docker0 上的地址（或用 `--network=host`），mac
 docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
-  -e REGISTRY_PROXY=http://192.0.2.10:4433 \
+  -e REGISTRY_PROXY=http://proxy.example.com:8080 \
   registry-manager:0.2.0
 ```
 

@@ -89,7 +89,7 @@ export default function SettingsPage({ config, inventory, onInventoryChange }: P
           <Descriptions.Item label="镜像引用前缀">
             <span className="mono">{config?.host ?? '--'}</span>
             <span style={{ marginLeft: 8, color: 'var(--color-text-3)' }}>
-              例：{config?.host ?? '<host>'}/example/vector:0.39.0-debian
+              例：{config?.host ?? '<host>'}/library/nginx:1.25
             </span>
           </Descriptions.Item>
           <Descriptions.Item label="访问方式">

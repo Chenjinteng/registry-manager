@@ -40,11 +40,13 @@ async function reachable(url) {
 }
 
 const CASES = [
+  // tag 只作首选；取不到就回退到 tags 列表的第一个 ——
+  // 上游删旧 tag 是常事，硬编码会变成"测试自己坏了"。
   {
     label: 'ghcr.io（Bearer，且拒绝无 scope 申请）',
     url: 'https://ghcr.io',
     repo: 'flannel-io/flannel',
-    tag: 'v0.26.4',
+    tag: 'latest',
   },
   { label: 'quay.io（Bearer）', url: 'https://quay.io', repo: 'coreos/etcd', tag: 'v3.5.0' },
   {
@@ -75,12 +77,21 @@ for (const c of CASES) {
     // 探测必须成功 —— 这是用户报的"源不可达"那个点
     const probe = await client.probe({ origin: 'source' });
     check(`${c.label} 探测成功`, Boolean(probe.apiVersion), probe.apiVersion);
-    // 真正的读取（带 scope）也必须成功
-    const manifest = await client.probeManifest(c.repo, c.tag, { origin: 'source' });
+    // 真正的读取（带 scope）也必须成功。
+    // 首选 tag 不存在就退到 tags 列表里的第一个，避免上游删 tag 导致误报。
+    let tag = c.tag;
+    let manifest = await client.probeManifest(c.repo, tag, { origin: 'source' });
+    if (!manifest.exists) {
+      const tags = await client.listTags(c.repo);
+      if (tags.length > 0) {
+        tag = tags[0];
+        manifest = await client.probeManifest(c.repo, tag, { origin: 'source' });
+      }
+    }
     check(
       `${c.label} 读到 manifest`,
       manifest.exists === true && Boolean(manifest.digest),
-      `${c.repo}:${c.tag} digest=${String(manifest.digest).slice(0, 20)}`
+      `${c.repo}:${tag} digest=${String(manifest.digest).slice(0, 20)}`
     );
   } catch (error) {
     check(`${c.label} 全流程`, false, `${error.code}: ${String(error.message).slice(0, 80)}`);

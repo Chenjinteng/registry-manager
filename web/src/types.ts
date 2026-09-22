@@ -187,7 +187,7 @@ export interface CredentialPatch {
 export interface ProxyEntry {
   id: string;
   name: string;
-  /** 形如 http://192.0.2.10:4433 */
+  /** 形如 http://proxy.example.com:8080 */
   url: string;
   username: string;
   /** 是否配了账号（密码不回传）。 */

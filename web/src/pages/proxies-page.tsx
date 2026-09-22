@@ -389,12 +389,12 @@ export default function ProxiesPage({ config: initialConfig }: Props) {
                 validator: (_, value: string) =>
                   /^https?:\/\//i.test(value?.trim() ?? '')
                     ? Promise.resolve()
-                    : Promise.reject(new Error('需要以 http:// 或 https:// 开头，例如 http://192.0.2.10:4433')),
+                    : Promise.reject(new Error('需要以 http:// 或 https:// 开头，例如 http://proxy.example.com:8080')),
               },
             ]}
             extra="只填 http://主机:端口，不要带路径，也不要把账号密码写进地址。"
           >
-            <Input placeholder="http://192.0.2.10:4433" />
+            <Input placeholder="http://proxy.example.com:8080" />
           </Form.Item>
           <Form.Item
             label="用户名（可选，匿名代理留空）"

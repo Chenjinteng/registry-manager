@@ -22,7 +22,7 @@ const PROXY_TEST_TIMEOUT_MS = 8_000;
  * @typedef {object} Proxy
  * @property {string} id
  * @property {string} name
- * @property {string} url        代理地址，形如 http://192.0.2.10:4433
+ * @property {string} url        代理地址，形如 http://proxy.example.com:8080
  * @property {string} username   可空（匿名代理）
  * @property {string} password   可空
  * @property {string} [note]
