@@ -43,6 +43,7 @@ import type {
   ApiResult,
   AppConfig,
   Credential,
+  DestStatus,
   PullJob,
   PullJobInput,
   PullJobStatus,
@@ -96,6 +97,19 @@ function defaultExpandedKeys(jobs: PullJob[]): string[] {
 function resolveCredentialLabel(id: string, list: Credential[] = []): string {
   const c = list.find((x) => x.id === id);
   return c ? `${c.name}（${c.username}）` : id;
+}
+
+/** 从 `<repo>:<tag>` 取出 tag；取不到时返回空串。 */
+function sourceTagOf(ref: string): string {
+  const colon = ref.lastIndexOf(':');
+  if (colon < 0) return '';
+  const tag = ref.slice(colon + 1);
+  return tag.includes('/') ? '' : tag;
+}
+
+/** 完整目的引用的主机前缀，如 `192.0.2.10:10001/`。 */
+function hostPrefixOf(host: string): string {
+  return host ? `${host}/` : '';
 }
 
 /**
@@ -246,8 +260,10 @@ export default function PullPage({ config }: Props) {
     const sourceUrlEffective = values.sourceUrl?.trim() || parsed.sourceUrl;
     const sourceRefEffective = parsed.sourceRef || image;
 
-    // destRepo：留空沿用源 repo；用户在表里可显式改成别的。
-    const destRepo = values.destRepo?.trim() || defaultDestRepoFromRef(sourceRefEffective);
+    // 目标引用 = 本 registry + 源镜像路径，全部自动补全，不再让用户填。
+    // 目的端主机固定来自服务配置（工具只管理一个 registry），所以这里只可能是
+    // 本仓库内的路径，不存在"push 到另一个 registry"的可能。
+    const destRepo = defaultDestRepoFromRef(sourceRefEffective);
 
     // 源端认证：credential / temp / none。
     let sourceCredentialId: string | undefined;
@@ -268,12 +284,12 @@ export default function PullPage({ config }: Props) {
         ? values.destCredentialId
         : undefined;
 
-    // 打开预览 Modal，让用户看清将要做什么 + 源端预检，再真正入队。
+    // 打开预览 Modal，让用户看清将要做什么 + 预检，再真正入队。
     setPendingInput({
       sourceUrl: sourceUrlEffective,
       sourceRef: sourceRefEffective,
       destRepo,
-      destTag: values.destTag?.trim() || undefined,
+      // destTag 不再由用户填，留空让服务端沿用源 tag（同一套默认口径）。
       sourceProxy: values.sourceProxy?.trim() || undefined,
       sourceCredentialId,
       destCredentialId,
@@ -481,38 +497,6 @@ export default function PullPage({ config }: Props) {
           >
             <Input placeholder="alpine:3.19" allowClear autoFocus />
           </Form.Item>
-          <div className="pull-form-grid">
-            <Form.Item
-              label="目标仓库（留空沿用源仓库名）"
-              extra="同名仓库已存在时会落到同一仓库下，不会覆盖已有 tag。"
-              rules={[
-                {
-                  validator: (_, value: string | undefined) =>
-                    !value ||
-                    /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(
-                      value
-                    )
-                      ? Promise.resolve()
-                      : Promise.reject(new Error('仓库名仅允许小写字母、数字、._-/')),
-                },
-              ]}
-            >
-              <Input placeholder="library/alpine" allowClear />
-            </Form.Item>
-            <Form.Item
-              label="目标 Tag（留空沿用源 tag）"
-              rules={[
-                {
-                  validator: (_, value: string | undefined) =>
-                    !value || /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/.test(value)
-                      ? Promise.resolve()
-                      : Promise.reject(new Error('tag 仅允许字母数字 ._-')),
-                },
-              ]}
-            >
-              <Input placeholder="3.19" allowClear />
-            </Form.Item>
-          </div>
           <Collapse
             ghost
             expandIcon={({ isActive }) => (
@@ -781,6 +765,7 @@ export default function PullPage({ config }: Props) {
 
       <PullPreviewModal
         input={pendingInput}
+        host={config?.host ?? ''}
         credentials={credentials}
         onConfirm={handleConfirmCreate}
         onCancel={handleCancelPreview}
@@ -799,12 +784,15 @@ export default function PullPage({ config }: Props) {
  */
 function PullPreviewModal({
   input,
+  host,
   credentials,
   onConfirm,
   onCancel,
   submitting,
 }: {
   input: PullJobInput | null;
+  /** 本仓库的 host[:port]，用于拼出完整的目的引用。 */
+  host: string;
   credentials: Credential[];
   onConfirm: () => void;
   onCancel: () => void;
@@ -813,7 +801,7 @@ function PullPreviewModal({
   const [probeResult, setProbeResult] = useState<
     | { state: 'idle' }
     | { state: 'loading' }
-    | { state: 'ok'; apiVersion: string; host: string }
+    | { state: 'ok'; apiVersion: string; host: string; dest?: DestStatus }
     | { state: 'failed'; message: string; origin?: 'source' | 'dest' }
   >({ state: 'idle' });
 
@@ -829,6 +817,9 @@ function PullPreviewModal({
         sourceUrl: input.sourceUrl,
         sourceProxy: input.sourceProxy,
         credentialId: input.sourceCredentialId,
+        sourceRef: input.sourceRef,
+        destRepo: input.destRepo,
+        destTag: input.destTag,
       })
       .then((result) => {
         if (cancelled) return;
@@ -837,6 +828,7 @@ function PullPreviewModal({
             state: 'ok',
             apiVersion: result.data.apiVersion,
             host: result.data.host,
+            dest: result.data.dest,
           });
         } else {
           setProbeResult({
@@ -861,7 +853,15 @@ function PullPreviewModal({
       title="即将创建拉取任务"
       okText="确认入队"
       cancelText="再改改"
-      okButtonProps={{ disabled: probeResult.state === 'failed' || probeResult.state === 'loading' || submitting, loading: submitting }}
+      okButtonProps={{
+        disabled:
+          probeResult.state === 'failed' ||
+          probeResult.state === 'loading' ||
+          // 源 tag 不存在时不让入队：入队也必然失败，还白占一次队列。
+          (probeResult.state === 'ok' && probeResult.dest?.sourceExists === false) ||
+          submitting,
+        loading: submitting,
+      }}
       onCancel={onCancel}
       onOk={onConfirm}
       destroyOnClose
@@ -883,20 +883,92 @@ function PullPreviewModal({
             <Descriptions.Item label="源镜像">
               <span className="mono">{input.sourceRef}</span>
             </Descriptions.Item>
-            <Descriptions.Item label="目的仓库">
-              <span className="mono">{input.destRepo}:{input.destTag}</span>
+            <Descriptions.Item label="目的引用">
+              <span className="mono">
+                {hostPrefixOf(host)}
+                {input.destRepo}:{input.destTag ?? sourceTagOf(input.sourceRef)}
+              </span>
+              <span style={{ marginLeft: 8, color: 'var(--color-text-3)' }}>
+                自动补全：本仓库地址 + 源镜像路径
+              </span>
             </Descriptions.Item>
             <Descriptions.Item label="目的认证">
               {input.destCredentialId
                 ? `${resolveCredentialLabel(input.destCredentialId, credentials)}（凭据库）`
                 : '不使用'}
             </Descriptions.Item>
-            <Descriptions.Item label="目的端">
-              <span style={{ color: 'var(--color-text-3)' }}>
-                写到当前管理的 registry（不允许修改）；连通性请到「设置」页测试。
-              </span>
-            </Descriptions.Item>
           </Descriptions>
+
+          {/* 源侧 tag 不存在：拼错了在这里就拦下，别等入队后才失败。 */}
+          {probeResult.state === 'ok' && probeResult.dest?.sourceExists === false ? (
+            <Alert
+              type="error"
+              showIcon
+              message={`源镜像不存在：${input.sourceRef}`}
+              description={
+                <span style={{ color: 'var(--color-text-3)' }}>
+                  源 registry 可达，但没有这个 tag。请检查镜像名与 tag 是否拼写正确。
+                </span>
+              }
+            />
+          ) : null}
+
+          {/* 目标 tag 已存在的提示：manifest PUT 是覆盖语义，替掉前必须让用户知道。 */}
+          {probeResult.state === 'ok' && probeResult.dest?.identical ? (
+            <Alert
+              type="info"
+              showIcon
+              message="目标 tag 已存在，且与源 digest 一致"
+              description={
+                <span style={{ color: 'var(--color-text-3)' }}>
+                  本仓库已有 <span className="mono">{probeResult.dest.destRepo}:{probeResult.dest.destTag}</span>
+                  （{shortDigest(probeResult.dest.existingDigest)}），与源相同，重复拉取不会改变内容。
+                </span>
+              }
+            />
+          ) : null}
+          {probeResult.state === 'ok' && probeResult.dest?.willReplace ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="目标 tag 已存在，本次拉取将替换它"
+              description={
+                <div>
+                  <div>
+                    本仓库 <span className="mono">{probeResult.dest.destRepo}:{probeResult.dest.destTag}</span>{' '}
+                    当前指向 <span className="mono">{shortDigest(probeResult.dest.existingDigest)}</span>，
+                    拉取后将指向 <span className="mono">{shortDigest(probeResult.dest.sourceDigest)}</span>。
+                  </div>
+                  <div style={{ marginTop: 4, color: 'var(--color-text-3)' }}>
+                    如果这个 tag 已被其他系统固定引用，替换后它们拿到的镜像会变。原 manifest 不会保留。
+                  </div>
+                </div>
+              }
+            />
+          ) : null}
+          {probeResult.state === 'ok' && probeResult.dest && !probeResult.dest.exists ? (
+            <Alert
+              type="success"
+              showIcon
+              message="目标 tag 不存在，将新建"
+              description={
+                <span style={{ color: 'var(--color-text-3)' }}>
+                  <span className="mono">{probeResult.dest.destRepo}:{probeResult.dest.destTag}</span>{' '}
+                  在本仓库中尚不存在。
+                </span>
+              }
+            />
+          ) : null}
+          {probeResult.state === 'ok' && probeResult.dest?.probeError ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="未能确认目标 tag 的现状"
+              description={
+                <span style={{ color: 'var(--color-text-3)' }}>{probeResult.dest.probeError}</span>
+              }
+            />
+          ) : null}
 
           <Alert
             type={

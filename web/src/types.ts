@@ -119,6 +119,29 @@ export interface PullJobInput {
   destAuthInline?: { username: string; password: string };
 }
 
+/**
+ * 预览时对目标 tag 现状的探测结果。
+ * 目标引用一律是「本仓库地址 + 源镜像路径」，所以这里只涉及本 registry 内的路径。
+ */
+export interface DestStatus {
+  sourceRepo: string;
+  sourceTag: string;
+  destRepo: string;
+  destTag: string;
+  /** 目标 tag 是否已存在。probeError 存在时此字段无意义。 */
+  exists?: boolean;
+  existingDigest?: string | null;
+  /** 源侧该 tag 是否存在 —— 拼错 tag 在这里就能拦下，不必等入队后失败。 */
+  sourceExists?: boolean;
+  sourceDigest?: string | null;
+  /** 已存在且 digest 与源不同 —— 拉取会替换现有 tag。 */
+  willReplace?: boolean;
+  /** 已存在且 digest 与源相同 —— 重复拉取没有意义。 */
+  identical?: boolean;
+  /** 目标探测失败的原因（不影响源可达性判断）。 */
+  probeError?: string;
+}
+
 export type CredentialPurpose = 'source' | 'dest' | 'both';
 
 export interface Credential {

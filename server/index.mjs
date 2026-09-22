@@ -257,8 +257,12 @@ app.post('/api/pull/jobs', ensurePullAllowed, async (req, res) => {
 });
 
 /**
- * 源端预检：创建任务前先打一次 GET /v2/，确认源 registry 可达 + 兼容 V2。
- * 不创建任务，不入队。目的端的预检走 /api/probe（由目的客户端覆盖）。
+ * 创建任务前的预检：一次请求同时回答两件事
+ *   1. 源 registry 是否可达、兼容 V2（GET /v2/）；
+ *   2. 目标 tag 在本仓库是否已存在、digest 是否与源一致
+ *      （两侧各一次 HEAD manifest，都是只读，不写任何东西）。
+ *
+ * 目的端主机固定来自配置，所以这里只能探测本 registry 内的路径。
  */
 app.post('/api/pull/probe', ensurePullAllowed, async (req, res) => {
   const body = req.body ?? {};
@@ -287,13 +291,72 @@ app.post('/api/pull/probe', ensurePullAllowed, async (req, res) => {
   try {
     const client = new RegistryClient({ url: rawUrl, proxy, auth });
     const probe = await client.probe({ origin: 'source' });
-    ok(res, {
-      data: { ...probe, sourceUrl: client.baseUrl, usingProxy: Boolean(proxy) },
-    });
+    const data = { ...probe, sourceUrl: client.baseUrl, usingProxy: Boolean(proxy) };
+
+    // 目标 tag 现状：解析入参（destRepo/destTag 都允许缺省，与创建任务同一套默认）。
+    const destInfo = resolveDestReference(body);
+    if (destInfo) {
+      data.dest = destInfo;
+      try {
+        const sourceManifest = await client.probeManifest(destInfo.sourceRepo, destInfo.sourceTag, {
+          origin: 'source',
+          dispatcher: client.dispatcher,
+        });
+        const destManifest = await client.probeManifest(destInfo.destRepo, destInfo.destTag, {
+          origin: 'dest',
+        });
+        data.dest = {
+          ...destInfo,
+          exists: destManifest.exists,
+          existingDigest: destManifest.digest,
+          sourceExists: sourceManifest.exists,
+          sourceDigest: sourceManifest.digest,
+          // 已存在且 digest 相同 → 重复拉取没有意义；不同 → 会替换现有 tag。
+          willReplace: destManifest.exists && destManifest.digest !== sourceManifest.digest,
+          identical:
+            destManifest.exists &&
+            Boolean(destManifest.digest) &&
+            destManifest.digest === sourceManifest.digest,
+        };
+      } catch (error) {
+        // 目标探测失败不该让整个预览失败：源可达信息已经拿到了，
+        // 把探测失败降级成一条提示即可。
+        data.dest = {
+          ...destInfo,
+          probeError:
+            error instanceof RegistryError ? error.message : String(error?.message ?? error),
+        };
+      }
+    }
+
+    ok(res, { data });
   } catch (error) {
     fail(res, error);
   }
 });
+
+/**
+ * 从预览入参解析出源 / 目标引用。入参不足以解析时返回 null（预览仍然可用）。
+ * 复用 puller 的口径：destRepo 缺省 = 源仓库路径，destTag 缺省 = 源 tag。
+ */
+function resolveDestReference(body) {
+  const sourceRef = String(body.sourceRef ?? '').trim();
+  if (!sourceRef) {
+    return null;
+  }
+  const colon = sourceRef.lastIndexOf(':');
+  if (colon < 0) {
+    return null;
+  }
+  const sourceRepo = sourceRef.slice(0, colon).replace(/^\/+/, '');
+  const sourceTag = sourceRef.slice(colon + 1);
+  if (!sourceRepo || !sourceTag) {
+    return null;
+  }
+  const destRepo = String(body.destRepo ?? '').trim() || sourceRepo;
+  const destTag = String(body.destTag ?? '').trim() || sourceTag;
+  return { sourceRepo, sourceTag, destRepo, destTag };
+}
 
 app.get('/api/pull/jobs', (req, res) => {
   ok(res, { data: pullQueue.list() });

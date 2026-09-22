@@ -48,12 +48,23 @@ function splitSourceRef(ref) {
   return { repo, tag };
 }
 
-/** sourceRef 默认沿用源 tag；用户可改 destTag。 */
+/**
+ * 归一化入参。
+ *
+ * 目标引用默认就是「源仓库路径 + 源 tag」——工具只管理一个 registry，
+ * 目的端主机固定来自配置，所以这里能自动补全的全部自动补全，
+ * 调用方（含 curl）只需要给一个镜像名。
+ *
+ * 注意：`destRepo` 只是**本 registry 内的路径**，写不进别的主机。
+ * 含 `:` 的值（例如 `192.0.2.20:10001/foo`）会被 REPO_RE 直接拒掉，
+ * 因此不存在"配成 push 到另一个 registry"的可能。
+ */
 function validateInputs({ sourceRef, destRepo, destTag }) {
   const split = splitSourceRef(sourceRef);
-  if (!destRepo || !REPO_RE.test(destRepo)) {
+  const effectiveDestRepo = destRepo || split.repo;
+  if (!REPO_RE.test(effectiveDestRepo)) {
     throw new RegistryError(
-      'destRepo 不合法（仅允许小写字母、数字、._-/ 分段）',
+      `destRepo 不合法（仅允许小写字母、数字、._-/ 分段，且只能是本 registry 内的路径）：${effectiveDestRepo}`,
       'INVALID_REQUEST'
     );
   }
@@ -63,7 +74,12 @@ function validateInputs({ sourceRef, destRepo, destTag }) {
       'INVALID_REQUEST'
     );
   }
-  return { sourceRepo: split.repo, sourceTag: split.tag, destRepo, destTag: destTag || split.tag };
+  return {
+    sourceRepo: split.repo,
+    sourceTag: split.tag,
+    destRepo: effectiveDestRepo,
+    destTag: destTag || split.tag,
+  };
 }
 
 /**

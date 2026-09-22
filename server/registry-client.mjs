@@ -309,6 +309,43 @@ export class RegistryClient {
     });
   }
 
+  /**
+   * HEAD manifest，返回是否存在与 digest。
+   *
+   * 与 `fetchManifest` 的区别：**不存在不算错误**，返回 `{ exists: false }`。
+   * 用于创建任务前的预览探测（"目标 tag 是否已存在、会不会被覆盖"），
+   * 那种场景下 404 是正常结果，不该变成异常。
+   */
+  async probeManifest(repository, reference, { origin, dispatcher } = {}) {
+    const response = await this.#request('HEAD', `/v2/${repository}/manifests/${reference}`, {
+      accept: MANIFEST_ACCEPT,
+      redirect: 'follow',
+      origin,
+      dispatcher,
+    });
+    if (response.status === 404) {
+      return { exists: false, digest: null };
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new RegistryError(
+        origin === 'source' ? sourceAuthMessage(response.status) : destAuthMessage(response.status, repository),
+        origin === 'source' ? 'SOURCE_UNAUTHORIZED' : 'DEST_FORBIDDEN',
+        { status: response.status }
+      ).withOrigin(origin);
+    }
+    if (!response.ok) {
+      throw new RegistryError(
+        `读取 ${repository}:${reference} 的 manifest 失败: HTTP ${response.status}`,
+        'HTTP_FAILED',
+        { status: response.status }
+      ).withOrigin(origin);
+    }
+    return {
+      exists: true,
+      digest: (response.headers.get('docker-content-digest') ?? '').trim() || null,
+    };
+  }
+
   async fetchConfigBlob(repository, digest) {
     const { payload } = await this.#getJson(`/v2/${repository}/blobs/${digest}`, {
       notFoundCode: 'MANIFEST_NOT_FOUND',

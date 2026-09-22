@@ -5,6 +5,7 @@ import type {
   CredentialInput,
   CredentialPatch,
   DeleteTagPayload,
+  DestStatus,
   Inventory,
   PullJob,
   PullJobInput,
@@ -70,11 +71,18 @@ export const probePullSource = (input: {
   sourceUrl: string;
   sourceProxy?: string;
   credentialId?: string;
+  /** 传了源引用，服务端就会顺带探测目标 tag 现状（是否已存在 / 会不会被覆盖）。 */
+  sourceRef?: string;
+  destRepo?: string;
+  destTag?: string;
 }) =>
-  request<{ apiVersion: string; host: string; sourceUrl: string; usingProxy: boolean }>(
-    '/api/pull/probe',
-    { method: 'POST', body: JSON.stringify(input) }
-  );
+  request<{
+    apiVersion: string;
+    host: string;
+    sourceUrl: string;
+    usingProxy: boolean;
+    dest?: DestStatus;
+  }>('/api/pull/probe', { method: 'POST', body: JSON.stringify(input) });
 
 export const listCredentials = () => request<Credential[]>('/api/credentials');
 
