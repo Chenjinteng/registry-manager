@@ -22,6 +22,8 @@ const DEFAULTS = {
   allowPull: true,
   // 内存里保留的最近任务数（当前任务 + 等待队列 + 历史）；重启即丢。
   pullQueueSize: 50,
+  // 凭据文件目录（加密 JSON 落盘位置；非数据库，仅本工具自用）。
+  credentialsDir: '/app/data',
 };
 
 function readConfigFile() {
@@ -68,6 +70,7 @@ export function loadConfig() {
       process.env.REGISTRY_PULL_QUEUE_SIZE || file.pullQueueSize,
       DEFAULTS.pullQueueSize
     ),
+    credentialsDir: String(process.env.REGISTRY_CREDENTIALS_DIR || file.credentialsDir || DEFAULTS.credentialsDir),
   };
 
   if (!config.url) {

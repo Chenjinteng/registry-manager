@@ -70,12 +70,46 @@ async function readDistributionError(response) {
   }
 }
 
+/**
+ * 源端 401 / 403 的可照做提示。
+ *
+ * 401 是"需要认证"——本工具支持 basic auth，所以要直接告诉用户去哪儿配，
+ * 而不是像过去那样说"本工具未配置凭据"（那是凭据功能上线前的旧文案，会误导）。
+ */
+function sourceAuthMessage(status) {
+  if (status === 401) {
+    return (
+      '源 registry 要求认证（HTTP 401）。请在任务的「高级选项 → 源认证」中选择一条凭据，' +
+      '或临时输入账号 / 密码后重试。'
+    );
+  }
+  return `源 registry 拒绝访问（HTTP ${status}）：账号可能没有该镜像的读取权限。`;
+}
+
+/** 目的端 401 / 403 的可照做提示。 */
+function destAuthMessage(status, destRepo) {
+  if (status === 401) {
+    return (
+      `目的 registry 要求认证（HTTP 401）。请在任务的「高级选项 → 目的认证」中选择一条凭据，` +
+      `或在「凭据管理」中为本仓库地址新增一条。`
+    );
+  }
+  return `目的 registry 拒绝写入 ${destRepo}（HTTP 403）：账号可能没有推送权限。`;
+}
+
 export class RegistryClient {
-  constructor({ url, proxy = '', timeoutMs = REQUEST_TIMEOUT_MS }) {
+  constructor({ url, proxy = '', timeoutMs = REQUEST_TIMEOUT_MS, auth }) {
     this.baseUrl = normalizeBaseUrl(url);
     this.timeoutMs = timeoutMs;
     // registry 常在内网且只开 HTTP；经代理访问由 ProxyAgent 处理。
     this.dispatcher = proxy ? new ProxyAgent(normalizeBaseUrl(proxy)) : undefined;
+    // Basic auth：拼成 `Authorization: Basic <base64>`。空 password 视为不传。
+    if (auth && auth.username) {
+      const credentials = `${auth.username}:${auth.password ?? ''}`;
+      this.authHeader = `Basic ${Buffer.from(credentials, 'utf8').toString('base64')}`;
+    } else {
+      this.authHeader = undefined;
+    }
   }
 
   get host() {
@@ -105,6 +139,9 @@ export class RegistryClient {
     const headers = { 'Cache-Control': 'no-cache' };
     if (accept) {
       headers.Accept = accept;
+    }
+    if (this.authHeader) {
+      headers.Authorization = this.authHeader;
     }
     try {
       return await undiciFetch(`${this.baseUrl}${path}`, {
@@ -203,7 +240,13 @@ export class RegistryClient {
     const response = await this.#request('GET', '/v2/', { timeoutMs: PROBE_TIMEOUT_MS, origin });
     const apiVersion = (response.headers.get('docker-distribution-api-version') ?? '').trim();
     if (response.status === 401) {
-      throw new RegistryError('镜像仓库要求认证，本工具未配置凭据', 'UNAUTHORIZED').withOrigin(origin);
+      const message =
+        origin === 'source'
+          ? sourceAuthMessage(401)
+          : origin === 'dest'
+          ? destAuthMessage(401, this.host)
+          : '镜像仓库要求认证（HTTP 401）。如需认证，请在「凭据管理」中新增凭据后在任务里选用。';
+      throw new RegistryError(message, 'UNAUTHORIZED').withOrigin(origin);
     }
     if (!response.ok) {
       throw new RegistryError(`仓库探测失败: HTTP ${response.status}`, 'HTTP_FAILED', {
@@ -313,7 +356,7 @@ export class RegistryClient {
       ).withOrigin('source');
     }
     if (response.status === 401 || response.status === 403) {
-      throw new RegistryError('源 registry 要求认证，本工具未配置凭据', 'SOURCE_UNAUTHORIZED', {
+      throw new RegistryError(sourceAuthMessage(response.status), 'SOURCE_UNAUTHORIZED', {
         status: response.status,
       }).withOrigin('source');
     }
@@ -346,7 +389,7 @@ export class RegistryClient {
       );
     }
     if (response.status === 401 || response.status === 403) {
-      throw new RegistryError('源 registry 要求认证，本工具未配置凭据', 'SOURCE_UNAUTHORIZED', {
+      throw new RegistryError(sourceAuthMessage(response.status), 'SOURCE_UNAUTHORIZED', {
         status: response.status,
       }).withOrigin('source');
     }
@@ -382,7 +425,7 @@ export class RegistryClient {
       );
     }
     if (response.status === 401 || response.status === 403) {
-      throw new RegistryError('源 registry 要求认证，本工具未配置凭据', 'SOURCE_UNAUTHORIZED', {
+      throw new RegistryError(sourceAuthMessage(response.status), 'SOURCE_UNAUTHORIZED', {
         status: response.status,
       }).withOrigin('source');
     }
@@ -422,11 +465,9 @@ export class RegistryClient {
       return { mounted: false };
     }
     if (response.status === 401 || response.status === 403) {
-      throw new RegistryError(
-        `目的 registry 拒绝写入 ${destRepo}（HTTP ${response.status}）`,
-        'DEST_FORBIDDEN',
-        { status: response.status }
-      ).withOrigin('dest');
+      throw new RegistryError(destAuthMessage(response.status, destRepo), 'DEST_FORBIDDEN', {
+        status: response.status,
+      }).withOrigin('dest');
     }
     throw new RegistryError(
       `目的 mount 失败: HTTP ${response.status}`,
@@ -443,7 +484,7 @@ export class RegistryClient {
       origin: 'dest',
     });
     if (response.status === 401 || response.status === 403) {
-      throw new RegistryError('目的 registry 拒绝写入', 'DEST_FORBIDDEN', {
+      throw new RegistryError(destAuthMessage(response.status, destRepo), 'DEST_FORBIDDEN', {
         status: response.status,
       }).withOrigin('dest');
     }
@@ -527,27 +568,41 @@ export class RegistryClient {
 
     resetIdle();
 
+    // 源端读错误单独记下来：源断流时 Transform 也会连带出错，
+    // 两者都要有归属，否则会变成未捕获异常 / 悬空的 promise。
+    let sourceError = null;
+    nodeSource.on('error', (error) => {
+      sourceError = error;
+    });
+    // PATCH 中途失败（或我们主动 abort）时 undici 会销毁 body，
+    // Transform 随之报错；这是预期路径，吞掉即可，真正的失败由 response 表达。
+    passthrough.on('error', () => {});
+
     try {
-      // 把 Node 源直接喂进 PATCH；undici 接受 Node Readable 作为 body。
-      const pumpPromise = new Promise((resolve, reject) => {
-        nodeSource.on('error', reject);
-        nodeSource.on('end', resolve);
-        nodeSource.pipe(passthrough);
-      });
+      nodeSource.pipe(passthrough);
 
       const headers = { 'Content-Type': 'application/octet-stream' };
       if (contentLength && Number.isFinite(contentLength)) {
         headers['Content-Length'] = String(contentLength);
       }
+      if (this.authHeader) {
+        headers.Authorization = this.authHeader;
+      }
       const response = await undiciFetch(url, {
         method: 'PATCH',
         headers,
         body: passthrough,
+        // 流式 body 必须显式声明 duplex，否则 undici / Node fetch 会在把请求
+        // 发出去之前就抛错（表现为"目的 PATCH 失败"但服务端根本没收到请求）。
+        duplex: 'half',
         signal: controller.signal,
         dispatcher: this.dispatcher,
       });
 
-      await pumpPromise;
+      // undici 解析出 response 就说明 body 已经写完，不需要再等额外的 pump promise。
+      if (sourceError) {
+        throw sourceError;
+      }
 
       if (signal && signal.aborted) {
         throw new RegistryError('拉取已取消', 'CANCELLED');
@@ -617,9 +672,13 @@ export class RegistryClient {
       }
     }
     try {
+      const headers = { 'Content-Type': contentType };
+      if (this.authHeader) {
+        headers.Authorization = this.authHeader;
+      }
       const response = await undiciFetch(`${this.baseUrl}/v2/${destRepo}/manifests/${tag}`, {
         method: 'PUT',
-        headers: { 'Content-Type': contentType },
+        headers,
         body,
         signal: controller.signal,
         dispatcher: this.dispatcher,
@@ -631,7 +690,7 @@ export class RegistryClient {
       }
       const distribution = await readDistributionError(response);
       if (response.status === 401 || response.status === 403) {
-        throw new RegistryError('目的 registry 拒绝写入 manifest', 'DEST_FORBIDDEN', {
+        throw new RegistryError(destAuthMessage(response.status, destRepo), 'DEST_FORBIDDEN', {
           status: response.status,
         }).withOrigin('dest');
       }

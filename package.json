@@ -12,7 +12,10 @@
     "dev": "concurrently -n server,web -c blue,green \"node --watch server/index.mjs\" \"vite\"",
     "build": "vite build",
     "start": "node server/index.mjs",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "verify": "node scripts/verify-auth.mjs && node scripts/verify-pull.mjs",
+    "verify:auth": "node scripts/verify-auth.mjs",
+    "verify:pull": "node scripts/verify-pull.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",

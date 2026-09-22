@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { RegistryClient, RegistryError, normalizeBaseUrl } from './registry-client.mjs';
+import { assertCredentialUsable } from './credentials.mjs';
 
 const INDEX_MEDIA_TYPES = new Set([
   'application/vnd.oci.image.index.v1+json',
@@ -120,10 +121,11 @@ class PullJobRunner {
    * @param {object} args.job
    * @param {AbortSignal} args.signal
    */
-  constructor({ destClient, job, signal }) {
+  constructor({ destClient, job, signal, credentialStore }) {
     this.destClient = destClient;
     this.job = job;
     this.signal = signal;
+    this.credentialStore = credentialStore;
   }
 
   /**
@@ -137,16 +139,56 @@ class PullJobRunner {
   }
 
   /**
+   * 按凭据 id 取认证信息（账号 / 密码）。
+   *
+   * 校验与入队时共用 `assertCredentialUsable`；这里是纵深防御 ——
+   * 万一任务入队后凭据被改写（改 url / 改用途），执行时仍会被拦下。
+   */
+  #resolveAuth(credentialId, purpose, registryUrl) {
+    if (!credentialId) {
+      return undefined;
+    }
+    const credential = this.credentialStore?.get(credentialId);
+    if (!credential) {
+      throw new RegistryError(`凭据不存在：${credentialId}`, 'JOB_NOT_FOUND').withOrigin(purpose);
+    }
+    assertCredentialUsable(credential, purpose, registryUrl);
+    return { username: credential.username, password: credential.password };
+  }
+
+  /**
    * 跑完整流程：拉 manifest → 按 blob 复制 → 落 manifest。
    * 失败 / 取消都会通过异常表达；调用方根据异常.code 决定 job.status。
    */
   async run() {
-    const { job, destClient } = this;
+    const { job } = this;
     const { sourceUrl, sourceProxy } = job;
+    // 源端认证：优先凭据库（按 id 校验 url / 用途），回落到任务自带的临时 inline 账号密码。
+    const sourceAuth = job.sourceCredentialId
+      ? this.#resolveAuth(job.sourceCredentialId, 'source', job.sourceUrl)
+      : job.sourceAuthInline;
     const sourceClient = new RegistryClient({
       url: sourceUrl,
       proxy: sourceProxy || '',
+      auth: sourceAuth,
     });
+
+    // 目的端：优先凭据库，回落到任务自带的临时 inline 账号密码；都没有则沿用构造时的。
+    //
+    // 必须把结果写回 this.destClient —— #copyBlob / manifest 落库都读 this.destClient，
+    // 只算一个局部变量会让凭据在此后的所有目的端请求上失效（第一个 mount 就是裸请求 → 401）。
+    const destAuth = job.destCredentialId
+      ? this.#resolveAuth(job.destCredentialId, 'dest', this.destClient.baseUrl)
+      : job.destAuthInline;
+    const destClient = destAuth
+      ? new RegistryClient({
+          url: this.destClient.baseUrl,
+          proxy: '',
+          dispatcher: this.destClient.dispatcher,
+          auth: destAuth,
+        })
+      : this.destClient;
+    this.destClient = destClient;
 
     job.status = 'running';
     job.startedAt = new Date().toISOString();
@@ -310,11 +352,12 @@ export class PullQueue {
   /**
    * @param {object} args
    * @param {RegistryClient} args.client     本仓库 RegistryClient
-   * @param {string}        args.destProxy   默认代理（任务 sourceProxy 为空时不用；目的端用 client.dispatcher）
+   * @param {CredentialStore} [args.credentialStore] 凭据库；提供则任务 / probe 时按 id 取账号密码
    * @param {number}        [args.historyLimit]
    */
-  constructor({ client, historyLimit = 50 }) {
+  constructor({ client, credentialStore, historyLimit = 50 }) {
     this.client = client;
+    this.credentialStore = credentialStore;
     this.historyLimit = Math.max(1, Math.floor(historyLimit));
     /** @type {Map<string, object>} jobId -> job */
     this.#jobs = new Map();
@@ -332,7 +375,17 @@ export class PullQueue {
   #waiting;
 
   /** 构造一个 PullJob 记录：queued + 初始化 phases。 */
-  #createJobRecord({ sourceUrl, sourceRef, sourceProxy, destRepo, destTag }) {
+  #createJobRecord({
+    sourceUrl,
+    sourceRef,
+    sourceProxy,
+    destRepo,
+    destTag,
+    sourceCredentialId,
+    destCredentialId,
+    sourceAuthInline,
+    destAuthInline,
+  }) {
     const validated = validateInputs({ sourceRef, destRepo, destTag });
     let normalizedSourceUrl;
     try {
@@ -351,6 +404,31 @@ export class PullQueue {
         );
       }
     }
+    // 校验凭据可用性（存在 + 用途 + url 严格匹配）。
+    // 放在入队时做，而不是等到 runner 执行：否则用户点了「确认入队」才失败，白点一次。
+    if ((sourceCredentialId || destCredentialId) && !this.credentialStore) {
+      throw new RegistryError(
+        '本次任务引用了凭据，但服务端未配置凭据库（缺少 REGISTRY_CREDENTIAL_KEY）。请重启服务并设置该环境变量，或改用匿名 / 临时输入。',
+        'CREDENTIAL_KEY_MISSING'
+      );
+    }
+    if (sourceCredentialId) {
+      const c = this.credentialStore?.get(sourceCredentialId);
+      if (!c) {
+        throw new RegistryError(`源凭据不存在：${sourceCredentialId}`, 'JOB_NOT_FOUND').withOrigin('source');
+      }
+      assertCredentialUsable(c, 'source', normalizedSourceUrl);
+    }
+    if (destCredentialId) {
+      const c = this.credentialStore?.get(destCredentialId);
+      if (!c) {
+        throw new RegistryError(`目的凭据不存在：${destCredentialId}`, 'JOB_NOT_FOUND').withOrigin('dest');
+      }
+      assertCredentialUsable(c, 'dest', this.client.baseUrl);
+    }
+    // inline 临时账号密码：不在凭据库中存在，但同样不进 PullJob 历史。
+    const sourceAuth = sanitizeInlineAuth(sourceAuthInline, 'source');
+    const destAuth = sanitizeInlineAuth(destAuthInline, 'dest');
     const jobId = randomUUID();
     const job = {
       id: jobId,
@@ -361,6 +439,10 @@ export class PullQueue {
       sourceTag: validated.sourceTag,
       destRepo: validated.destRepo,
       destTag: validated.destTag,
+      sourceCredentialId: sourceCredentialId || undefined,
+      destCredentialId: destCredentialId || undefined,
+      sourceAuthInline: sourceAuth,
+      destAuthInline: destAuth,
       status: 'queued',
       bytes: 0,
       totalBytes: null,
@@ -379,23 +461,46 @@ export class PullQueue {
    * 创建任务并入队。
    * 立即返回任务记录；执行异步进行。
    */
-  enqueue({ sourceUrl, sourceRef, sourceProxy, destRepo, destTag }) {
-    const job = this.#createJobRecord({ sourceUrl, sourceRef, sourceProxy, destRepo, destTag });
+  enqueue({
+    sourceUrl,
+    sourceRef,
+    sourceProxy,
+    destRepo,
+    destTag,
+    sourceCredentialId,
+    destCredentialId,
+    sourceAuthInline,
+    destAuthInline,
+  }) {
+    const job = this.#createJobRecord({
+      sourceUrl,
+      sourceRef,
+      sourceProxy,
+      destRepo,
+      destTag,
+      sourceCredentialId,
+      destCredentialId,
+      sourceAuthInline,
+      destAuthInline,
+    });
     this.#jobs.set(job.id, job);
     this.#waiting.push(job.id);
     this.#trimHistory();
     // 触发执行
     queueMicrotask(() => this.#drain());
-    return job;
+    return stripInlineAuth(job);
   }
 
   /** 列出全部已知任务（含 waiting/running/已结束），按创建时间倒序。 */
   list() {
-    return [...this.#jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return [...this.#jobs.values()]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map(stripInlineAuth);
   }
 
   get(id) {
-    return this.#jobs.get(id) ?? null;
+    const job = this.#jobs.get(id) ?? null;
+    return job ? stripInlineAuth(job) : null;
   }
 
   /**
@@ -476,6 +581,7 @@ export class PullQueue {
       destClient: this.client,
       job,
       signal: abort.signal,
+      credentialStore: this.credentialStore,
     });
     try {
       await runner.run();
@@ -521,4 +627,32 @@ function makePhase(name) {
     totalBytes: null,
     message: '',
   };
+}
+
+/**
+ * 把任务里的 inline 凭据归一化成 `{ username, password }`，并做最小校验。
+ * 任一字段缺失返回 undefined（视为"不传"）。
+ * 注：inline 凭据只活到任务结束，不进 PullJob 历史 / API 响应。
+ */
+function sanitizeInlineAuth(input, origin) {
+  if (!input) return undefined;
+  const username = String(input.username ?? '').trim();
+  const password = String(input.password ?? '');
+  if (!username) {
+    throw new RegistryError(`${origin} 临时认证：用户名不能为空`, 'INVALID_REQUEST').withOrigin(origin);
+  }
+  if (!password) {
+    throw new RegistryError(`${origin} 临时认证：密码不能为空`, 'INVALID_REQUEST').withOrigin(origin);
+  }
+  return { username, password };
+}
+
+/**
+ * 任务对象对外暴露时去掉 inline 凭据（保留 credentialId 给前端显示"用的是哪条凭据"）。
+ * inline 凭据只活到 runner.run() 内部。
+ */
+function stripInlineAuth(job) {
+  if (!job) return job;
+  const { sourceAuthInline, destAuthInline, ...rest } = job;
+  return rest;
 }

@@ -3,3 +3,6 @@ web/dist
 .env
 registry.config.json
 *.log
+# 凭据库落盘目录（默认 /app/data，容器外跑时常指到项目内）。
+# 里面是加密凭据，绝不入库。
+data/
