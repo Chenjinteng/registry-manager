@@ -14,11 +14,13 @@
  * 用法：node scripts/verify-pull.mjs
  */
 import { createServer } from 'node:http';
+import { connect as netConnect } from 'node:net';
 import { createHash } from 'node:crypto';
 
 import { PullQueue } from '../server/puller.mjs';
 import { RegistryClient } from '../server/registry-client.mjs';
 import { CredentialStore } from '../server/credentials.mjs';
+import { ProxyStore, buildProxyUrl } from '../server/proxies.mjs';
 
 const SRC_USER = 'src-user';
 const SRC_PASS = 'src-pass';
@@ -253,6 +255,24 @@ const dstRepos = {};
 const src = await listen(makeRegistry({ expectedAuth: SRC_AUTH, repos: srcRepos, seen: srcSeen, label: 'src' }));
 const dst = await listen(makeRegistry({ expectedAuth: DST_AUTH, repos: dstRepos, seen: dstSeen, label: 'dst' }));
 
+// ---------------- mock 正向代理（支持 CONNECT，undici 走隧道） ----------------
+// 用来证明：任务里选了代理库的代理后，源端请求确实穿过它。
+const proxyConnects = [];
+const proxyServer = createServer();
+proxyServer.on('connect', (req, clientSocket) => {
+  proxyConnects.push({ target: req.url, auth: req.headers['proxy-authorization'] ?? null });
+  const [host, port] = req.url.split(':');
+  const up = netConnect(Number(port), host, () => {
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    up.pipe(clientSocket);
+    clientSocket.pipe(up);
+  });
+  up.on('error', () => clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'));
+  clientSocket.on('error', () => up.destroy());
+});
+const proxyUrl = await new Promise((resolve) => {
+  proxyServer.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${proxyServer.address().port}`));
+});
 // ---------------- 凭据库（只存外部源凭据，走真实加密存储） ----------------
 const storePath = `/tmp/verify-pull-${Date.now()}.json`;
 const store = new CredentialStore({ filePath: storePath, masterKey: 'verify-pull-master-key-0123456789' });
@@ -266,12 +286,22 @@ const srcCred = await store.create({
 // ---------------- 用真实 PullQueue 拉一次 ----------------
 // 目的端凭据属于**部署配置**（本 registry 的认证），在构造 client 时注入，
 // 不再作为任务级选项 —— 这里模拟 index.mjs 从 config 读取后的装配方式。
+// 代理库：与凭据库同一个密钥，独立文件。
+const proxyStore = new ProxyStore({ filePath: `${storePath}.proxies.json`, masterKey: 'verify-pull-master-key-0123456789' });
+const proxyEntry = await proxyStore.create({
+  name: '测试代理',
+  url: proxyUrl,
+  username: 'proxy-user',
+  password: 'proxy:p@ss/1',
+});
+
 const queue = new PullQueue({
   client: new RegistryClient({
     url: dst.url,
     auth: { username: DST_USER, password: DST_PASS },
   }),
   credentialStore: store,
+  proxyStore,
   historyLimit: 5,
 });
 
@@ -281,6 +311,7 @@ const job = queue.enqueue({
   destRepo: 'lib/demo',
   destTag: 'v1',
   sourceCredentialId: srcCred.id,
+  sourceProxyId: proxyEntry.id,
 });
 
 const finished = await new Promise((resolve, reject) => {
@@ -328,6 +359,26 @@ check(
   'manifest 原样落库',
   dstRepos['lib/demo']?.v1?.manifest?.equals(manifestBytes) === true
 );
+const expectedProxyAuth =
+  'Basic ' + Buffer.from('proxy-user:proxy:p@ss/1').toString('base64');
+check(
+  '源端请求经代理库的代理（建立了 CONNECT 隧道）',
+  proxyConnects.some((c) => c.target.endsWith(new URL(src.url).port)),
+  `CONNECT 数 ${proxyConnects.length}`
+);
+check(
+  '代理自身收到了正确的 Proxy-Authorization（含特殊字符密码）',
+  proxyConnects.some((c) => c.auth === expectedProxyAuth),
+  proxyConnects[0]?.auth ?? '(none)'
+);
+check(
+  '目的端没有被代理（本仓库代理属于另一份配置）',
+  proxyConnects.every((c) => !c.target.endsWith(new URL(dst.url).port)),
+);
+check(
+  '任务记录里不含明文代理密码',
+  !JSON.stringify(finished).includes('p@ss'),
+);
 check(
   '所有请求都带认证（无匿名裸请求）',
   [...srcSeen, ...dstSeen].every((r) => r.auth !== '(none)'),
@@ -336,6 +387,7 @@ check(
 
 src.server.close();
 dst.server.close();
+proxyServer.close();
 await import('node:fs').then((fs) => fs.rmSync(storePath, { force: true }));
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);

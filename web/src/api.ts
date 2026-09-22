@@ -7,6 +7,10 @@ import type {
   DeleteTagPayload,
   DestStatus,
   Inventory,
+  ProxyEntry,
+  ProxyInput,
+  ProxyPatch,
+  ProxyTestResult,
   PullJob,
   PullJobInput,
 } from './types';
@@ -70,6 +74,7 @@ export const removePullJob = (id: string) =>
 export const probePullSource = (input: {
   sourceUrl: string;
   sourceProxy?: string;
+  proxyId?: string;
   credentialId?: string;
   /** 传了源引用，服务端就会顺带探测目标 tag 现状（是否已存在 / 会不会被覆盖）。 */
   sourceRef?: string;
@@ -106,3 +111,27 @@ export const testCredential = (id: string) =>
     `/api/credentials/${encodeURIComponent(id)}/test`,
     { method: 'POST' }
   );
+
+export const listProxies = () => request<ProxyEntry[]>('/api/proxies');
+
+export const getProxy = (id: string) =>
+  request<ProxyEntry>(`/api/proxies/${encodeURIComponent(id)}`);
+
+export const createProxy = (input: ProxyInput) =>
+  request<ProxyEntry>('/api/proxies', { method: 'POST', body: JSON.stringify(input) });
+
+export const updateProxy = (id: string, patch: ProxyPatch) =>
+  request<ProxyEntry>(`/api/proxies/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+
+export const deleteProxy = (id: string) =>
+  request<{ id: string }>(`/api/proxies/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
+/** 测试代理连通性；targetUrl 留空则服务端用本 registry 的 /v2/。 */
+export const testProxy = (id: string, targetUrl?: string) =>
+  request<ProxyTestResult>(`/api/proxies/${encodeURIComponent(id)}/test`, {
+    method: 'POST',
+    body: JSON.stringify({ targetUrl: targetUrl || '' }),
+  });

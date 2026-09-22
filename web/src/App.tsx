@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { App as AntdApp, Segmented, Tag } from 'antd';
 import {
+  ApiOutlined,
   CloudDownloadOutlined,
   DockerOutlined,
   KeyOutlined,
@@ -10,10 +11,11 @@ import {
 import ImagesPage from './pages/images-page';
 import PullPage from './pages/pull-page';
 import CredentialsPage from './pages/credentials-page';
+import ProxiesPage from './pages/proxies-page';
 import SettingsPage from './pages/settings-page';
 import type { AppConfig, Inventory } from './types';
 
-type PageKey = 'images' | 'pull' | 'credentials' | 'settings';
+type PageKey = 'images' | 'pull' | 'credentials' | 'proxies' | 'settings';
 
 /**
  * 布局对齐 平台 控制台（web/src/app/layout.tsx + web/src/components/sub-layout）：
@@ -24,6 +26,7 @@ const NAV_ITEMS: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'images', label: '镜像列表', icon: <DockerOutlined /> },
   { key: 'pull', label: '镜像拉取', icon: <CloudDownloadOutlined /> },
   { key: 'credentials', label: '凭据管理', icon: <KeyOutlined /> },
+  { key: 'proxies', label: '代理管理', icon: <ApiOutlined /> },
   { key: 'settings', label: '设置', icon: <SettingOutlined /> },
 ];
 
@@ -82,6 +85,8 @@ export default function App() {
               <PullPage config={config} />
             ) : page === 'credentials' ? (
               <CredentialsPage config={config} />
+            ) : page === 'proxies' ? (
+              <ProxiesPage config={config} />
             ) : (
               <SettingsPage
                 config={config}

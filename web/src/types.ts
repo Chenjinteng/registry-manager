@@ -47,8 +47,10 @@ export interface AppConfig {
   /** false 时服务端拒绝一切拉取写入（GET 列表仍可读）。 */
   allowPull: boolean;
   pullQueueSize: number;
-  /** false 时服务端没配密钥或凭据库初始化失败，凭据库不可用。 */
+  /** false 时服务端没配密钥或加密存储初始化失败，凭据库不可用。 */
   allowCredentials: boolean;
+  /** 代理库是否可用（与凭据库同源，取决于 REGISTRY_CREDENTIAL_KEY）。 */
+  allowProxies: boolean;
   credentialsDir: string;
   /** 凭据库不可用时的具体原因；可用时为 null。 */
   credentialError: { code: string; message: string } | null;
@@ -88,6 +90,7 @@ export interface PullJob {
   sourceRef: string;
   /** 仅用于判断"是否填了代理"；不回显具体地址以避免误以为是凭据。 */
   sourceProxy: string;
+  sourceProxyId?: string;
   sourceRepo: string;
   sourceTag: string;
   destRepo: string;
@@ -111,6 +114,8 @@ export interface PullJobInput {
   sourceUrl: string;
   sourceRef: string;
   sourceProxy?: string;
+  /** 代理库里的代理 id；与 sourceProxy 二选一（id 优先）。 */
+  sourceProxyId?: string;
   destRepo: string;
   destTag?: string;
   sourceCredentialId?: string;
@@ -173,4 +178,49 @@ export interface CredentialPatch {
   /** 传空字符串视为不更新密码；省略同空。 */
   password?: string;
   note?: string;
+}
+
+/**
+ * 代理库条目：只服务**外部源**。
+ * 本 registry 自身的代理属于部署配置（registry.config.json 的 proxy），不在这里。
+ */
+export interface ProxyEntry {
+  id: string;
+  name: string;
+  /** 形如 http://192.0.2.10:4433 */
+  url: string;
+  username: string;
+  /** 是否配了账号（密码不回传）。 */
+  hasAuth: boolean;
+  note?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProxyInput {
+  name: string;
+  url: string;
+  username?: string;
+  password?: string;
+  note?: string;
+}
+
+export interface ProxyPatch {
+  name?: string;
+  url?: string;
+  username?: string;
+  /** 传空字符串 = 清掉密码（改成匿名代理）。 */
+  password?: string;
+  note?: string;
+}
+
+/** 代理连通性测试结果。 */
+export interface ProxyTestResult {
+  ok: boolean;
+  status?: number;
+  statusText?: string;
+  elapsedMs: number;
+  targetUrl: string;
+  registryApiVersion?: string | null;
+  error?: string;
 }

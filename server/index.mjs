@@ -22,6 +22,7 @@ import { Inventory } from './inventory.mjs';
 import { RegistryClient, RegistryError } from './registry-client.mjs';
 import { PullQueue } from './puller.mjs';
 import { CredentialStore, pickCredentialPublic, assertCredentialUsable } from './credentials.mjs';
+import { ProxyStore, pickProxyPublic, testProxyConnectivity, buildProxyUrl } from './proxies.mjs';
 import { resolve as resolvePath, join } from 'node:path';
 
 const config = loadConfig();
@@ -47,11 +48,12 @@ const inventory = new Inventory(client, { ttlSeconds: config.cacheTtlSeconds });
  * 反复去检查 env（容器里 env 确实有），却查不出真正原因。
  */
 const credentialKey = String(process.env.REGISTRY_CREDENTIAL_KEY ?? '').trim();
-const credentialsFile = resolvePath(join(config.credentialsDir, 'credentials.json'));
+const secretsDir = config.credentialsDir;
 
 /** @type {{code: string, message: string} | null} */
 let credentialInitError = null;
 let credentialStore = null;
+let proxyStore = null;
 
 if (!credentialKey) {
   credentialInitError = {
@@ -60,13 +62,21 @@ if (!credentialKey) {
   };
 } else {
   try {
-    credentialStore = new CredentialStore({ filePath: credentialsFile, masterKey: credentialKey });
+    credentialStore = new CredentialStore({
+      filePath: resolvePath(join(secretsDir, 'credentials.json')),
+      masterKey: credentialKey,
+    });
+    // 代理库用同一个密钥、同一个目录、独立文件。
+    proxyStore = new ProxyStore({
+      filePath: resolvePath(join(secretsDir, 'proxies.json')),
+      masterKey: credentialKey,
+    });
   } catch (error) {
     credentialInitError = {
       code: 'CREDENTIAL_STORE_INIT_FAILED',
       message:
-        `凭据库初始化失败：${error.message}。` +
-        `密钥已读到（长度 ${credentialKey.length}），问题出在凭据目录 ` +
+        `加密存储初始化失败：${error.message}。` +
+        `密钥已读到（长度 ${credentialKey.length}），问题出在数据目录 ` +
         `${config.credentialsDir}（需要存在且对运行用户可写）。` +
         `容器里以非 root 的 node 用户运行时，请确保该目录属主是 node（见 Dockerfile / compose 的 volume 配置）。`,
     };
@@ -77,6 +87,7 @@ if (!credentialKey) {
 const pullQueue = new PullQueue({
   client,
   credentialStore: credentialStore ?? undefined,
+  proxyStore: proxyStore ?? undefined,
   historyLimit: config.pullQueueSize,
 });
 
@@ -120,6 +131,7 @@ app.get('/api/config', (req, res) => {
       allowPull: config.allowPull,
       pullQueueSize: config.pullQueueSize,
       allowCredentials: Boolean(credentialStore),
+      allowProxies: Boolean(proxyStore),
       credentialsDir: config.credentialsDir,
       // 凭据库不可用时把原因一并给出，页面才能显示真正的问题，
       // 而不是一律猜“没配 KEY”。
@@ -242,6 +254,7 @@ app.post('/api/pull/jobs', ensurePullAllowed, async (req, res) => {
       sourceUrl: String(body.sourceUrl ?? ''),
       sourceRef: String(body.sourceRef ?? ''),
       sourceProxy: body.sourceProxy ? String(body.sourceProxy) : '',
+      sourceProxyId: body.sourceProxyId ? String(body.sourceProxyId) : '',
       destRepo: String(body.destRepo ?? ''),
       destTag: body.destTag ? String(body.destTag) : '',
       sourceCredentialId: body.sourceCredentialId ? String(body.sourceCredentialId) : '',
@@ -271,9 +284,24 @@ app.post('/api/pull/jobs', ensurePullAllowed, async (req, res) => {
 app.post('/api/pull/probe', ensurePullAllowed, async (req, res) => {
   const body = req.body ?? {};
   const rawUrl = String(body.sourceUrl ?? '');
-  const proxy = body.sourceProxy ? String(body.sourceProxy) : '';
+  let proxyUrl = body.sourceProxy ? String(body.sourceProxy) : '';
   const credentialId = body.credentialId ? String(body.credentialId) : '';
+  const proxyId = body.proxyId ? String(body.proxyId) : '';
   let auth;
+  // 用了代理库里的代理，就把它的地址（含 basic auth）取出来用于预检，
+  // 与真实拉取走同一条路径。
+  if (proxyId) {
+    if (!proxyStore) {
+      fail(res, new RegistryError('代理库未配置', 'CREDENTIAL_KEY_MISSING'));
+      return;
+    }
+    const proxy = proxyStore.get(proxyId);
+    if (!proxy) {
+      fail(res, new RegistryError('代理不存在', 'JOB_NOT_FOUND'));
+      return;
+    }
+    proxyUrl = buildProxyUrl(proxy);
+  }
   if (credentialId) {
     if (!credentialStore) {
       fail(res, new RegistryError('凭据库未配置', 'PULL_DISABLED'));
@@ -296,9 +324,9 @@ app.post('/api/pull/probe', ensurePullAllowed, async (req, res) => {
     // 注意命名：下面用的是**源端** client；探测目标 tag 现状必须用模块级的
     // `client`（本仓库，带配置里的凭据），否则会去源 registry 上查目标仓库，
     // 得出完全错误的"是否已存在 / 会不会被替换"结论。
-    const sourceClient = new RegistryClient({ url: rawUrl, proxy, auth });
+    const sourceClient = new RegistryClient({ url: rawUrl, proxy: proxyUrl, auth });
     const probe = await sourceClient.probe({ origin: 'source' });
-    const data = { ...probe, sourceUrl: sourceClient.baseUrl, usingProxy: Boolean(proxy) };
+    const data = { ...probe, sourceUrl: sourceClient.baseUrl, usingProxy: Boolean(proxyUrl) };
 
     // 目标 tag 现状：解析入参（destRepo/destTag 都允许缺省，与创建任务同一套默认）。
     const destInfo = resolveDestReference(body);
@@ -412,17 +440,26 @@ app.delete('/api/pull/jobs/:id', ensurePullAllowed, (req, res) => {
 // ---------------------------------------------------------------------------
 
 function ensureCredentialsAvailable(req, res, next) {
-  if (!credentialStore) {
+  ensureSecretsAvailable(res, next, credentialStore, '凭据库');
+}
+
+/** 凭据库与代理库共用同一个密钥与数据目录，不可用的原因是同一个。 */
+function ensureSecretsAvailable(res, next, store, label) {
+  if (!store) {
     fail(
       res,
       new RegistryError(
-        '凭据库未配置：服务启动时未设置 REGISTRY_CREDENTIAL_KEY，请参考 README 配置密钥后重启',
+        `${label}未配置：服务启动时未设置 REGISTRY_CREDENTIAL_KEY，请参考 README 配置密钥后重启`,
         'CREDENTIAL_KEY_MISSING'
       )
     );
     return;
   }
   next();
+}
+
+function ensureProxiesAvailable(req, res, next) {
+  ensureSecretsAvailable(res, next, proxyStore, '代理库');
 }
 
 function readCredentialId(req) {
@@ -518,6 +555,95 @@ app.post('/api/credentials/:id/test', ensureCredentialsAvailable, async (req, re
     }
     fail(res, error);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 代理库（只服务外部源；本 registry 的代理在配置文件的 proxy 里）
+// ---------------------------------------------------------------------------
+
+function readProxyId(req) {
+  return String(req.params.id ?? '').trim();
+}
+
+app.get('/api/proxies', ensureProxiesAvailable, (req, res) => {
+  try {
+    ok(res, { data: proxyStore.list().map(pickProxyPublic) });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
+app.get('/api/proxies/:id', ensureProxiesAvailable, (req, res) => {
+  try {
+    const item = proxyStore.get(readProxyId(req));
+    if (!item) {
+      fail(res, new RegistryError('代理不存在', 'JOB_NOT_FOUND'));
+      return;
+    }
+    ok(res, { data: pickProxyPublic(item) });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
+app.post('/api/proxies', ensureProxiesAvailable, async (req, res) => {
+  try {
+    const item = await proxyStore.create(req.body ?? {});
+    ok(res, { data: pickProxyPublic(item), message: '已创建代理' });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
+app.patch('/api/proxies/:id', ensureProxiesAvailable, async (req, res) => {
+  try {
+    const item = await proxyStore.update(readProxyId(req), req.body ?? {});
+    ok(res, { data: pickProxyPublic(item), message: '已更新代理' });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
+app.delete('/api/proxies/:id', ensureProxiesAvailable, async (req, res) => {
+  try {
+    const result = await proxyStore.remove(readProxyId(req));
+    ok(res, { data: result, message: '已删除代理' });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
+/**
+ * 测试代理连通性：实际穿过这个代理去访问一个目标，报告状态码与耗时。
+ *
+ * `targetUrl` 可选，默认本 registry 的 `/v2/`（这是最常需要经代理访问的目标）；
+ * 想验证"能不能出外网"就填 https://registry-1.docker.io/v2/ 之类。
+ */
+app.post('/api/proxies/:id/test', ensureProxiesAvailable, async (req, res) => {
+  const id = readProxyId(req);
+  const proxy = proxyStore.get(id);
+  if (!proxy) {
+    fail(res, new RegistryError('代理不存在', 'JOB_NOT_FOUND'));
+    return;
+  }
+  const rawTarget = String(req.body?.targetUrl ?? '').trim();
+  const targetUrl = rawTarget || `${config.url.replace(/\/+$/, '')}/v2/`;
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    fail(res, new RegistryError('测试目标必须以 http:// 或 https:// 开头', 'INVALID_REQUEST'));
+    return;
+  }
+  try {
+    new URL(targetUrl);
+  } catch {
+    fail(res, new RegistryError(`测试目标无法解析：${targetUrl}`, 'INVALID_REQUEST'));
+    return;
+  }
+  const result = await testProxyConnectivity(proxy, targetUrl);
+  if (result.ok) {
+    ok(res, { data: result });
+    return;
+  }
+  fail(res, new RegistryError(result.error, 'PROXY_TEST_FAILED'));
 });
 
 // 生产态同源托管前端；开发态由 Vite 提供页面。

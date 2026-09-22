@@ -1,95 +1,14 @@
 /**
- * 凭据库：加密 JSON 文件。
+ * 凭据库：只存**外部源** registry 的 basic auth。
  *
- * 设计要点：
- * - AES-256-GCM 加密整个凭据数组（不含密码长度信息）；
- * - 密钥从环境变量 REGISTRY_CREDENTIAL_KEY 派生（scrypt），不落盘 / 不进镜像；
- * - API 输出永远不带明文密码（pickPublic 把 password 替换成 hasPassword 布尔）；
- * - 单进程单文件锁，写入是原子的（write tmp + rename）。
- *
- * 失败 / 限制：
- * - 密钥 + 文件同时丢失 = 永久不可恢复。这是 AES-GCM 的固有限制，README 会再次提醒。
- * - 这里只存 source / dest 双向的 basic auth；不做 OAuth / token rotation。
- */
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-
-import { RegistryError } from './registry-client.mjs';
-
-const SCHEMA_VERSION = 1;
-const KDF = 'scrypt';
-const KDF_KEYLEN = 32;
-const KDF_SALT_BYTES = 16;
-const KDF_PARAMS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
-const IV_BYTES = 12;
-const AUTH_TAG_BYTES = 16;
-
-/**
- * 凭据库只存**外部源**的 basic auth。
+ * 加密与落盘细节见 secret-file.mjs（AES-256-GCM + scrypt + 原子写）。
+ * API 输出永远不带明文密码（pickCredentialPublic 把 password 换成 hasPassword）。
  *
  * 本 registry 自身的凭据属于部署配置（没有它连镜像列表都打不开），
  * 放在 config.mjs 里，不由这里管理 —— 因此没有"用途"这个维度。
- *
- * @typedef {object} Credential
- * @property {string} id
- * @property {string} name
- * @property {string} registryUrl
- * @property {string} username
- * @property {string} password
- * @property {string} [note]
- * @property {string} createdAt
- * @property {string} updatedAt
- *
- * @typedef {object} CredentialPublic
- * @property {string} id
- * @property {string} name
- * @property {string} registryUrl
- * @property {string} username
- * @property {boolean} hasPassword
- * @property {string} [note]
- * @property {string} createdAt
- * @property {string} updatedAt
  */
-
-let fileLock = Promise.resolve();
-
-/**
- * 派生 32 字节密钥。两次调用同 masterKey + 同 salt 必得到同密钥。
- */
-function deriveKey(masterKey, salt) {
-  return scryptSync(masterKey, salt, KDF_KEYLEN, KDF_PARAMS);
-}
-
-/**
- * 把对象加密成 base64 字符串（AES-256-GCM + 12B IV + 16B tag）。
- */
-function encryptPayload(plain, masterKey) {
-  const salt = randomBytes(KDF_SALT_BYTES);
-  const key = deriveKey(masterKey, salt);
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const ciphertext = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(plain), 'utf8')), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  // 拼装：salt | iv | tag | ciphertext
-  return Buffer.concat([salt, iv, authTag, ciphertext]).toString('base64');
-}
-
-function decryptPayload(b64, masterKey) {
-  const raw = Buffer.from(b64, 'base64');
-  if (raw.length < KDF_SALT_BYTES + IV_BYTES + AUTH_TAG_BYTES) {
-    throw new Error('凭据文件被破坏');
-  }
-  const salt = raw.subarray(0, KDF_SALT_BYTES);
-  const iv = raw.subarray(KDF_SALT_BYTES, KDF_SALT_BYTES + IV_BYTES);
-  const tag = raw.subarray(KDF_SALT_BYTES + IV_BYTES, KDF_SALT_BYTES + IV_BYTES + AUTH_TAG_BYTES);
-  const ciphertext = raw.subarray(KDF_SALT_BYTES + IV_BYTES + AUTH_TAG_BYTES);
-  const key = deriveKey(masterKey, salt);
-  const decipher = createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(tag);
-  const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return JSON.parse(plain.toString('utf8'));
-}
+import { EncryptedCollection, normalizeUrl, randomId } from './secret-file.mjs';
+import { RegistryError } from './registry-client.mjs';
 
 /**
  * 验证创建/更新请求的字段合法性。
@@ -120,91 +39,29 @@ function validateCredentialInput(input) {
  * 凭据库：单例。
  */
 export class CredentialStore {
+  #store;
+
   constructor({ filePath, masterKey }) {
-    if (!masterKey) {
-      throw new Error('凭据库未配置密钥：请设置环境变量 REGISTRY_CREDENTIAL_KEY');
-    }
-    this.filePath = resolve(filePath);
-    this.masterKey = masterKey;
-    this.#ensureDir();
+    this.#store = new EncryptedCollection({ filePath, masterKey, label: '凭据' });
   }
 
-  #ensureDir() {
-    const dir = dirname(this.filePath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-    }
-    try {
-      chmodSync(dir, 0o700);
-    } catch {
-      // 一些平台（macOS 开发机）拿不到权限位，忽略。
-    }
+  get filePath() {
+    return this.#store.filePath;
   }
 
-  /** 文件锁：串行化所有写操作，避免并发覆盖。 */
-  #withLock(fn) {
-    const next = fileLock.then(() => fn());
-    fileLock = next.catch(() => {});
-    return next;
-  }
-
-  /** 读全部凭据（明文，含 password）；解密失败抛 RegistryError。 */
   /**
    * 读全部凭据（明文，含 password）。
    *
    * **同步**：内部只用 readFileSync + 同步 crypto，没有等待点；
-   * 保持同步让 enqueue 时的凭据校验（id 存在 / 用途 / url 匹配）不必变成异步。
-   * 写路径才是异步的（#writeAll 经文件锁串行化）。
+   * 保持同步让 enqueue 时的凭据校验（id 存在 / registryUrl 匹配）不必变成异步。
+   * 写路径才是异步的（经 EncryptedCollection 的锁串行化）。
    */
   #readAll() {
-    if (!existsSync(this.filePath)) {
-      return [];
-    }
-    let raw;
-    try {
-      raw = JSON.parse(readFileSync(this.filePath, 'utf8'));
-    } catch (error) {
-      throw new RegistryError(`凭据文件被破坏（不是合法 JSON）：${error.message}`, 'CREDENTIAL_FILE_BROKEN');
-    }
-    if (raw?.schema !== SCHEMA_VERSION) {
-      throw new RegistryError(`凭据文件 schema 不支持：${raw?.schema}`, 'CREDENTIAL_FILE_BROKEN');
-    }
-    if (raw.kdf !== KDF) {
-      throw new RegistryError(`凭据文件 KDF 不支持：${raw.kdf}`, 'CREDENTIAL_FILE_BROKEN');
-    }
-    let plain;
-    try {
-      plain = decryptPayload(raw.ciphertext, this.masterKey);
-    } catch (error) {
-      throw new RegistryError(
-        `凭据文件解密失败：${error.message}。通常是密钥不匹配或文件被篡改`,
-        'CREDENTIAL_DECRYPT_FAILED'
-      );
-    }
-    if (!Array.isArray(plain)) {
-      throw new RegistryError('凭据文件内容不是数组', 'CREDENTIAL_FILE_BROKEN');
-    }
-    return plain;
+    return this.#store.readAll();
   }
 
-  /** 原子写：写 tmp + rename，进程被中断不会留下半截文件。 */
-  async #writeAll(items) {
-    return this.#withLock(async () => {
-      const ciphertext = encryptPayload(items, this.masterKey);
-      const tmp = `${this.filePath}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ schema: SCHEMA_VERSION, kdf: KDF, ciphertext }, null, 2), 'utf8');
-      try {
-        chmodSync(tmp, 0o600);
-      } catch {
-        // ignore
-      }
-      renameSync(tmp, this.filePath);
-      try {
-        chmodSync(this.filePath, 0o600);
-      } catch {
-        // ignore
-      }
-    });
+  #writeAll(items) {
+    return this.#store.writeAll(items);
   }
 
   list() {
@@ -212,8 +69,7 @@ export class CredentialStore {
   }
 
   get(id) {
-    const all = this.#readAll();
-    return all.find((c) => c.id === id) ?? null;
+    return this.#store.get(id);
   }
 
   /**
@@ -231,7 +87,7 @@ export class CredentialStore {
   async create(input) {
     const validated = validateCredentialInput(input);
     const all = this.#readAll();
-    const id = randomBytesUUID();
+    const id = randomId();
     const now = new Date().toISOString();
     const item = {
       id,
@@ -321,11 +177,6 @@ export function pickCredentialPublic(c) {
   };
 }
 
-/** 去掉尾部斜杠，用于 registryUrl 比较。 */
-function normalizeUrl(url) {
-  return String(url ?? '').trim().replace(/\/+$/, '');
-}
-
 /**
  * 校验一条凭据能否用于目标源地址；不能则抛 RegistryError。
  *
@@ -345,14 +196,4 @@ export function assertCredentialUsable(credential, targetUrl) {
       'CREDENTIAL_URL_MISMATCH'
     ).withOrigin('source');
   }
-}
-
-function randomBytesUUID() {
-  // 用 crypto.randomBytes 自己造一个 UUIDv4。避开 node:crypto 的 randomUUID
-  // 以保持 ESM 单文件兼容；也不依赖外部包。
-  const b = randomBytes(16);
-  b[6] = (b[6] & 0x0f) | 0x40;
-  b[8] = (b[8] & 0x3f) | 0x80;
-  const hex = b.toString('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

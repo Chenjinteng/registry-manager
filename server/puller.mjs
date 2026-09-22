@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 
 import { RegistryClient, RegistryError, normalizeBaseUrl } from './registry-client.mjs';
 import { assertCredentialUsable } from './credentials.mjs';
+import { buildProxyUrl } from './proxies.mjs';
 
 const INDEX_MEDIA_TYPES = new Set([
   'application/vnd.oci.image.index.v1+json',
@@ -137,11 +138,12 @@ class PullJobRunner {
    * @param {object} args.job
    * @param {AbortSignal} args.signal
    */
-  constructor({ destClient, job, signal, credentialStore }) {
+  constructor({ destClient, job, signal, credentialStore, proxyStore }) {
     this.destClient = destClient;
     this.job = job;
     this.signal = signal;
     this.credentialStore = credentialStore;
+    this.proxyStore = proxyStore;
   }
 
   /**
@@ -173,12 +175,30 @@ class PullJobRunner {
   }
 
   /**
+   * 解析这次任务要用的源端代理。
+   *
+   * 优先代理库（按 id，带 basic auth 时在此拼出带凭据的 URL；**只在进程内使用**），
+   * 回落到任务自带的临时代理串。
+   */
+  #resolveSourceProxy(job) {
+    if (!job.sourceProxyId) {
+      return job.sourceProxy || '';
+    }
+    const proxy = this.proxyStore?.get(job.sourceProxyId);
+    if (!proxy) {
+      throw new RegistryError(`代理不存在：${job.sourceProxyId}`, 'JOB_NOT_FOUND').withOrigin('source');
+    }
+    return buildProxyUrl(proxy);
+  }
+
+  /**
    * 跑完整流程：拉 manifest → 按 blob 复制 → 落 manifest。
    * 失败 / 取消都会通过异常表达；调用方根据异常.code 决定 job.status。
    */
   async run() {
     const { job } = this;
-    const { sourceUrl, sourceProxy } = job;
+    const { sourceUrl } = job;
+    const sourceProxy = this.#resolveSourceProxy(job);
     // 源端认证：优先凭据库（按 id 校验 registryUrl），回落到任务自带的临时 inline 账号密码。
     const sourceAuth = job.sourceCredentialId
       ? this.#resolveSourceAuth(job.sourceCredentialId, job.sourceUrl)
@@ -356,9 +376,10 @@ export class PullQueue {
    * @param {CredentialStore} [args.credentialStore] 凭据库；提供则任务 / probe 时按 id 取账号密码
    * @param {number}        [args.historyLimit]
    */
-  constructor({ client, credentialStore, historyLimit = 50 }) {
+  constructor({ client, credentialStore, proxyStore, historyLimit = 50 }) {
     this.client = client;
     this.credentialStore = credentialStore;
+    this.proxyStore = proxyStore;
     this.historyLimit = Math.max(1, Math.floor(historyLimit));
     /** @type {Map<string, object>} jobId -> job */
     this.#jobs = new Map();
@@ -380,6 +401,7 @@ export class PullQueue {
     sourceUrl,
     sourceRef,
     sourceProxy,
+    sourceProxyId,
     destRepo,
     destTag,
     sourceCredentialId,
@@ -418,6 +440,16 @@ export class PullQueue {
       }
       assertCredentialUsable(c, normalizedSourceUrl);
     }
+    // 代理库的 id 也要在入队时就校验：否则等到执行才发现代理被删了。
+    if (sourceProxyId && !this.proxyStore) {
+      throw new RegistryError(
+        '本次任务引用了代理库中的代理，但服务端未配置加密存储（缺少 REGISTRY_CREDENTIAL_KEY）。请重启服务并设置该环境变量，或改用临时输入。',
+        'CREDENTIAL_KEY_MISSING'
+      );
+    }
+    if (sourceProxyId && !this.proxyStore?.get(sourceProxyId)) {
+      throw new RegistryError(`代理不存在：${sourceProxyId}`, 'JOB_NOT_FOUND').withOrigin('source');
+    }
     // inline 临时账号密码：不在凭据库中存在，但同样不进 PullJob 历史。
     const sourceAuth = sanitizeInlineAuth(sourceAuthInline, 'source');
     const jobId = randomUUID();
@@ -426,6 +458,7 @@ export class PullQueue {
       sourceUrl: normalizedSourceUrl,
       sourceRef,
       sourceProxy: sourceProxy || '',
+      sourceProxyId: sourceProxyId || undefined,
       sourceRepo: validated.sourceRepo,
       sourceTag: validated.sourceTag,
       destRepo: validated.destRepo,
@@ -454,6 +487,7 @@ export class PullQueue {
     sourceUrl,
     sourceRef,
     sourceProxy,
+    sourceProxyId,
     destRepo,
     destTag,
     sourceCredentialId,
@@ -463,6 +497,7 @@ export class PullQueue {
       sourceUrl,
       sourceRef,
       sourceProxy,
+      sourceProxyId,
       destRepo,
       destTag,
       sourceCredentialId,
@@ -567,6 +602,7 @@ export class PullQueue {
       job,
       signal: abort.signal,
       credentialStore: this.credentialStore,
+      proxyStore: this.proxyStore,
     });
     try {
       await runner.run();

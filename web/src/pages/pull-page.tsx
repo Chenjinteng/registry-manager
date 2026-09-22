@@ -35,6 +35,7 @@ import {
   createPullJob,
   fetchConfig,
   listCredentials,
+  listProxies,
   listPullJobs,
   probePullSource,
   removePullJob,
@@ -44,6 +45,7 @@ import type {
   AppConfig,
   Credential,
   DestStatus,
+  ProxyEntry,
   PullJob,
   PullJobInput,
   PullJobStatus,
@@ -67,7 +69,10 @@ interface FormValues {
   image: string;       // 源镜像名（可能含主机前缀）
   destImage?: string;  // 本 registry 内的目标镜像名 <repo>[:<tag>]，不含主机
   sourceUrl?: string;  // 高级选项：留空时由 image 自动推断
-  sourceProxy?: string; // 高级选项：本任务的来源代理
+  // 高级选项：源端代理（不用 / 从代理库选 / 临时输入）
+  sourceProxyMode?: 'none' | 'library' | 'temp';
+  sourceProxyId?: string;
+  sourceProxy?: string;
   sourceAuthMode?: 'none' | 'credential' | 'temp';
   sourceCredentialId?: string;
   sourceTempUsername?: string;
@@ -87,6 +92,15 @@ function defaultExpandedKeys(jobs: PullJob[]): string[] {
 function resolveCredentialLabel(id: string, list: Credential[] = []): string {
   const c = list.find((x) => x.id === id);
   return c ? `${c.name}（${c.username}）` : id;
+}
+
+/** 预览里展示这次用了哪个代理（代理库的名字优先，否则临时地址）。 */
+function resolveProxyLabel(input: PullJobInput, list: ProxyEntry[] = []): string {
+  if (input.sourceProxyId) {
+    const p = list.find((x) => x.id === input.sourceProxyId);
+    return p ? `${p.name}（${p.url}）` : input.sourceProxyId;
+  }
+  return input.sourceProxy ? `临时 ${input.sourceProxy}` : '不使用';
 }
 
 /** 从 `<repo>:<tag>` 取出 tag；取不到时返回空串。 */
@@ -172,6 +186,7 @@ export default function PullPage({ config }: Props) {
   /** 创建前的预览：表单点击"加入队列"后打开 Modal 确认 + 源预检。 */
   const [pendingInput, setPendingInput] = useState<PullJobInput | null>(null);
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [proxies, setProxies] = useState<ProxyEntry[]>([]);
   const liveConfigRef = useRef<AppConfig | null>(config);
   liveConfigRef.current = config;
   /** 本仓库的 host[:port]；作为固定前缀展示，不可编辑。 */
@@ -228,6 +243,20 @@ export default function PullPage({ config }: Props) {
   useEffect(() => {
     void refreshCredentials();
   }, [refreshCredentials]);
+
+  /** 代理库与凭据库同源，可用性一起判断。 */
+  const refreshProxies = useCallback(async () => {
+    if (!liveConfigRef.current?.allowProxies) {
+      setProxies([]);
+      return;
+    }
+    const result = await listProxies();
+    setProxies(result.success && result.data ? result.data : []);
+  }, []);
+
+  useEffect(() => {
+    void refreshProxies();
+  }, [refreshProxies]);
 
   const refresh = useCallback(async () => {
     const result = await listPullJobs();
@@ -317,7 +346,12 @@ export default function PullPage({ config }: Props) {
       destRepo,
       // 目标镜像名里没写 tag 时留空，让服务端沿用源 tag（同一套默认口径）。
       destTag: destTag || undefined,
-      sourceProxy: values.sourceProxy?.trim() || undefined,
+      sourceProxyId:
+        values.sourceProxyMode === 'library' && values.sourceProxyId
+          ? values.sourceProxyId
+          : undefined,
+      sourceProxy:
+        values.sourceProxyMode === 'temp' ? values.sourceProxy?.trim() || undefined : undefined,
       sourceCredentialId,
       sourceAuthInline,
     });
@@ -601,21 +635,78 @@ export default function PullPage({ config }: Props) {
                       >
                         <Input placeholder="自动推断" allowClear />
                       </Form.Item>
-                      <Form.Item
-                        label="来源代理（可选）"
-                        extra="仅作用于本次任务的源端；目的端走服务配置的代理。"
-                        rules={[
-                          {
-                            validator: (_, value: string | undefined) =>
-                              !value || /^https?:\/\//i.test(value.trim())
-                                ? Promise.resolve()
-                                : Promise.reject(new Error('需要以 http:// 或 https:// 开头')),
-                          },
-                        ]}
-                      >
-                        <Input placeholder="http://proxy.example.com:8080" allowClear />
-                      </Form.Item>
                     </div>
+
+                    <Form.Item
+                      label="源端代理"
+                      extra="仅作用于本次拉取访问源；本仓库自身的代理走服务配置。"
+                    >
+                      <Input.Group compact>
+                        <Form.Item name="sourceProxyMode" noStyle initialValue="none">
+                          <Radio.Group optionType="button" buttonStyle="solid">
+                            <Radio.Button value="none">不用</Radio.Button>
+                            <Radio.Button value="library">代理库</Radio.Button>
+                            <Radio.Button value="temp">临时输入</Radio.Button>
+                          </Radio.Group>
+                        </Form.Item>
+                      </Input.Group>
+                    </Form.Item>
+
+                    <Form.Item
+                      noStyle
+                      shouldUpdate={(prev, current) =>
+                        prev.sourceProxyMode !== current.sourceProxyMode
+                      }
+                    >
+                      {({ getFieldValue }) => {
+                        const mode = getFieldValue('sourceProxyMode');
+                        if (mode === 'library') {
+                          return (
+                            <Form.Item
+                              label="选择代理"
+                              name="sourceProxyId"
+                              rules={[{ required: true, message: '请选择一个代理' }]}
+                            >
+                              <Select
+                                placeholder={
+                                  proxies.length === 0
+                                    ? '代理库还是空的，请先到「代理管理」新增'
+                                    : '选择代理'
+                                }
+                                disabled={proxies.length === 0}
+                                options={proxies.map((p) => ({
+                                  value: p.id,
+                                  label: `${p.name}（${p.url}${p.hasAuth ? '，带认证' : ''}）`,
+                                }))}
+                              />
+                            </Form.Item>
+                          );
+                        }
+                        if (mode === 'temp') {
+                          return (
+                            <Form.Item
+                              label="临时代理地址"
+                              name="sourceProxy"
+                              rules={[
+                                { required: true, message: '请填写代理地址' },
+                                {
+                                  validator: (_, value: string | undefined) =>
+                                    !value || /^https?:\/\//i.test(value.trim())
+                                      ? Promise.resolve()
+                                      : Promise.reject(
+                                          new Error('需要以 http:// 或 https:// 开头')
+                                        ),
+                                },
+                              ]}
+                              extra="只用于本次任务，不写入代理库。需要认证时写成 http://用户:密码@主机:端口。"
+                            >
+                              <Input placeholder="http://proxy.example.com:8080" allowClear />
+                            </Form.Item>
+                          );
+                        }
+                        return null;
+                      }}
+                    </Form.Item>
 
                     <Form.Item
                       label="源认证"
@@ -797,6 +888,7 @@ export default function PullPage({ config }: Props) {
         host={config?.host ?? ''}
         usingAuth={Boolean(config?.usingAuth)}
         credentials={credentials}
+        proxies={proxies}
         onConfirm={handleConfirmCreate}
         onCancel={handleCancelPreview}
         submitting={submitting}
@@ -817,6 +909,7 @@ function PullPreviewModal({
   host,
   usingAuth,
   credentials,
+  proxies,
   onConfirm,
   onCancel,
   submitting,
@@ -827,6 +920,7 @@ function PullPreviewModal({
   /** 本仓库是否配了 basic auth（来自服务配置，任务级不可改）。 */
   usingAuth: boolean;
   credentials: Credential[];
+  proxies: ProxyEntry[];
   onConfirm: () => void;
   onCancel: () => void;
   submitting: boolean;
@@ -850,6 +944,7 @@ function PullPreviewModal({
         sourceUrl: input.sourceUrl,
         sourceProxy: input.sourceProxy,
         credentialId: input.sourceCredentialId,
+        proxyId: input.sourceProxyId,
         sourceRef: input.sourceRef,
         destRepo: input.destRepo,
         destTag: input.destTag,
@@ -904,7 +999,11 @@ function PullPreviewModal({
           <Descriptions size="small" column={1} bordered>
             <Descriptions.Item label="源 registry">
               <span className="mono">{input.sourceUrl}</span>
-              {input.sourceProxy ? <Tag color="gold" style={{ marginLeft: 8 }}>来源代理</Tag> : null}
+              {input.sourceProxyId || input.sourceProxy ? (
+                <Tag color="gold" style={{ marginLeft: 8 }}>
+                  源端代理：{resolveProxyLabel(input, proxies)}
+                </Tag>
+              ) : null}
             </Descriptions.Item>
             <Descriptions.Item label="源认证">
               {input.sourceCredentialId
