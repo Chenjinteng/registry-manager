@@ -127,7 +127,10 @@ function failureHint(job: PullJob): string {
     case 'SOURCE_UNREACHABLE':
       return '源 registry 连不上，请检查地址 / 代理';
     case 'SOURCE_UNAUTHORIZED':
-      return '源 registry 要求认证，本工具不支持';
+      // 公开镜像会自动申请匿名令牌，所以走到这里基本是"私有镜像 / 需要账号"。
+      return '源要求认证：公开镜像会自动取匿名令牌，这里失败通常是私有镜像，请在「源认证」里配凭据';
+    case 'NOT_A_REGISTRY':
+      return '该地址不是镜像仓库（可能只是镜像站的网站/反代），请填真正的 registry 地址';
     case 'SOURCE_MANIFEST_NOT_FOUND':
       return '源镜像 / tag 不存在';
     case 'SOURCE_BLOB_NOT_FOUND':
@@ -957,7 +960,15 @@ function PullPreviewModal({
   const [probeResult, setProbeResult] = useState<
     | { state: 'idle' }
     | { state: 'loading' }
-    | { state: 'ok'; apiVersion: string; host: string; dest?: DestStatus }
+    | {
+        state: 'ok';
+        apiVersion: string;
+        host: string;
+        authRequired?: boolean;
+        tokenRealm?: string;
+        tokenError?: string;
+        dest?: DestStatus;
+      }
     | { state: 'failed'; message: string; origin?: 'source' | 'dest' }
   >({ state: 'idle' });
 
@@ -985,6 +996,9 @@ function PullPreviewModal({
             state: 'ok',
             apiVersion: result.data.apiVersion,
             host: result.data.host,
+            authRequired: result.data.authRequired,
+            tokenRealm: result.data.tokenRealm,
+            tokenError: result.data.tokenError,
             dest: result.data.dest,
           });
         } else {
@@ -1168,7 +1182,17 @@ function PullPreviewModal({
                 </span>
               ) : probeResult.state === 'ok' ? (
                 <span style={{ color: 'var(--color-text-3)' }}>
-                  源 registry 已就绪。目的端的写入权限由本仓库决定，不在此处预检。
+                  {probeResult.authRequired ? (
+                    <>
+                      该源使用<strong>令牌认证</strong>（Bearer）
+                      {probeResult.tokenRealm ? `，令牌服务 ${probeResult.tokenRealm}` : ''}。
+                      公开镜像会自动申请匿名令牌，<strong>无需在此配凭据</strong>；
+                      只有私有镜像才需要在「源认证」里选一条凭据。
+                    </>
+                  ) : (
+                    <>源 registry 已就绪（匿名可读），无需配凭据。</>
+                  )}{' '}
+                  目的端的写入权限由本仓库决定，不在此处预检。
                 </span>
               ) : null
             }

@@ -233,7 +233,18 @@ serverBase = baseUrl;
     await client.probeManifest('library/private', 'latest', { origin: 'source' });
     check('令牌申请失败应抛错', false, '竟然成功了');
   } catch (error) {
-    check('令牌申请失败抛 UNAUTHORIZED', error.code === 'UNAUTHORIZED', error.code);
+    // 令牌申请失败 ≠ 直接抛令牌错误：把 registry 的原始 401 交回上层，
+    // 由它给出"源要求认证 + 令牌申请失败原因"的完整提示。
+    check(
+      '令牌申请失败时给出认证错误',
+      ['UNAUTHORIZED', 'SOURCE_UNAUTHORIZED'].includes(error.code),
+      error.code
+    );
+    check(
+      '错误文案带上了令牌申请失败的原因',
+      String(error.message).includes('令牌申请失败'),
+      String(error.message).slice(0, 70)
+    );
   }
 }
 

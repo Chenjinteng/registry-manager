@@ -86,6 +86,12 @@ export const probePullSource = (input: {
     host: string;
     sourceUrl: string;
     usingProxy: boolean;
+    /** 该源使用 Bearer 令牌认证（公开镜像也会匿名取 token，属于正常情况）。 */
+    authRequired?: boolean;
+    /** 令牌服务地址，便于排查。 */
+    tokenRealm?: string;
+    /** 令牌申请失败的原因（此时仍算"可达"，只是拿不到 token）。 */
+    tokenError?: string;
     dest?: DestStatus;
   }>('/api/pull/probe', { method: 'POST', body: JSON.stringify(input) });
 

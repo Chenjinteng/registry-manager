@@ -47,6 +47,11 @@ pnpm type-check   # 前端类型
 pnpm verify       # 非破坏性回归：basic 认证头 / Bearer 令牌流程 / 双端认证的完整拉取
 ```
 
+`pnpm verify:real` 会访问**真实**公共 registry（ghcr.io / quay.io / mcr / 华为 SWR）
+验证 Bearer 流程，需要出网，连不上会跳过；它不进默认 `verify`。
+实测价值见下：mock 只能复现"我以为的"服务端行为，而真实世界更严格 ——
+ghcr.io 会拒绝**无 scope** 的令牌申请（403），quay.io 回 401。
+
 `pnpm verify` 会起几个进程内的 mock registry（Basic auth、Bearer 令牌各一套），用真实的
 `PullQueue` 跑一次完整拉取，断言认证头真的发到了线路上、流式 PATCH 真的到达目的端、
 blob 逐字节一致、manifest 原样落库。**不接触任何真实仓库**，可以随时跑。
@@ -345,6 +350,25 @@ scrypt 派生；密钥与文件**同时丢失 = 凭据永久不可恢复**，运
 
 临时输入模式下，预览 Modal 不会做认证连通测试（密码不在凭据库、服务端拿不到）；
 但任务真正开始时会带上账号密码去连源。
+
+### 别把「镜像站的网站」当成 registry
+
+国内很多镜像加速站（例如渡渡鸟 `docker.aityp.com`）的主域名其实是**网站**，
+被 nginx 的 `Basic realm="Authorization Required"` 挡着，响应里连
+`Docker-Distribution-Api-Version` 头都没有 —— 它**不是 registry**，怎么配凭据都拉不动。
+
+而 `docker pull` 看起来"能用"，是因为配在 `daemon.json` 的 `registry-mirrors` 一旦失败，
+**Docker 会静默回落到官方 registry**，你看到的成功其实没走镜像站。
+
+真正承载镜像的往往是另一个域名。以渡渡鸟为例，实际可拉的是华为 SWR 上的同步结果：
+
+```
+源 registry  https://swr.cn-north-4.myhuaweicloud.com
+镜像名       ddn-k8s/docker.io/library/nginx:latest
+```
+
+本工具对这两种情形给的是**不同**的错误：地址缺少 registry API 版本头时判为
+`NOT_A_REGISTRY`（提示"这不是 registry"），而不是笼统地说"需要认证"。
 
 ### 公共源为什么"不用配凭据"也能拉
 

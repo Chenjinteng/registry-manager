@@ -76,13 +76,15 @@ async function readDistributionError(response) {
  * 401 是"需要认证"——本工具支持 basic auth，所以要直接告诉用户去哪儿配，
  * 而不是像过去那样说"本工具未配置凭据"（那是凭据功能上线前的旧文案，会误导）。
  */
-function sourceAuthMessage(status, { bearerRealm } = {}) {
+function sourceAuthMessage(status, { bearerRealm, tokenError } = {}) {
   if (status === 401) {
     if (bearerRealm) {
       return (
         `源 registry 要求认证（HTTP 401，Bearer 令牌服务 ${bearerRealm}）。` +
         '本工具会自动申请匿名令牌；仍失败说明该镜像不是公开的，' +
-        '请在任务的「高级选项 → 源认证」中选择一条凭据（账号 / 令牌）。'
+        '请在任务的「高级选项 → 源认证」中选择一条凭据（账号 / 令牌）。' +
+        // 令牌申请本身失败时把原因带上，否则用户只知道"401"却看不出卡在哪一步。
+        (tokenError ? `（令牌申请失败：${tokenError}）` : '')
       );
     }
     return (
@@ -235,7 +237,10 @@ export class RegistryClient {
 
   /** 当前已知的 Bearer 挑战信息（用于把 realm 写进报错，便于定位）。 */
   #challengeInfo() {
-    return this.bearerChallenge?.realm ? { bearerRealm: this.bearerChallenge.realm } : {};
+    return {
+      ...(this.bearerChallenge?.realm ? { bearerRealm: this.bearerChallenge.realm } : {}),
+      ...(this.lastTokenError ? { tokenError: this.lastTokenError.message } : {}),
+    };
   }
 
   /** ping `/v2/` 只为拿挑战头；401 也算成功（本就是为了拿 realm）。 */
@@ -318,7 +323,17 @@ export class RegistryClient {
           this.bearerChallenge = challenge;
           // 之前那个 token 没能通过，清掉强制重取。
           this.tokenCache.delete(scope ?? '');
-          const token = await this.tokenFor(scope, { signal, dispatcher });
+          let token = null;
+          try {
+            token = await this.tokenFor(scope, { signal, dispatcher });
+          } catch (tokenError) {
+            // 令牌申请失败**不等于**这次请求失败：
+            // 有些 registry 会拒绝某些 scope 的申请（例如 ghcr 对无 scope 的
+            // 申请回 403），但调用方拿到的这个 401 本身是有效信息
+            // （probe 就靠它判断"可达且是 V2 registry"）。
+            // 所以记下来、把原始响应交回上层，由上层决定怎么解读。
+            this.lastTokenError = tokenError;
+          }
           if (token) {
             response = await send({ ...headers, Authorization: `Bearer ${token}` });
           }
@@ -412,6 +427,13 @@ export class RegistryClient {
   /**
    * 探测 `/v2/`。
    *
+   * 回答的是"**这个地址可达吗、是不是 V2 registry**"，而不是"我能不能匿名读它"。
+   * 所以：**401 + 合法的 Bearer 挑战 = 可达且是 V2 registry**，算探测成功
+   * （标记 authRequired）。这条很重要 —— 有些 registry 会拒绝无 scope 的令牌申请
+   * （实测 ghcr.io 对 `/v2/` 的无 scope 申请回 403、quay.io 回 401），
+   * 若把 401 一律当失败，预览就会误报"源不可达"，用户连入队按钮都点不了，
+   * 而实际上带 scope 的 manifest 读取完全正常。
+   *
    * 不能用 OPTIONS 的 Allow 头判断删除能力：Distribution 对已关闭删除的实例
    * 同样宣告 `Allow: DELETE`，只有真正 DELETE 才会返回 405。
    */
@@ -419,6 +441,33 @@ export class RegistryClient {
     const response = await this.#request('GET', '/v2/', { timeoutMs: PROBE_TIMEOUT_MS, origin });
     const apiVersion = (response.headers.get('docker-distribution-api-version') ?? '').trim();
     if (response.status === 401) {
+      const challenge = parseBearerChallenge(response.headers.get('www-authenticate'));
+      if (challenge) {
+        // 拿到了正规的 Bearer 挑战 → 地址是活的、且说 V2。
+        return {
+          apiVersion: apiVersion || 'registry/2.0',
+          host: this.host,
+          authRequired: true,
+          tokenRealm: challenge.realm,
+          // 令牌申请失败时把原因带上，便于排查（例如"该 registry 拒绝匿名申请"）。
+          tokenError: this.lastTokenError?.message,
+        };
+      }
+      // 401 且没有 Bearer 挑战。
+      //
+      // 先区分一件很常见的事：**这个地址压根不是 registry**。
+      // 很多"镜像站"的网站/反代会直接回 `Basic realm="Authorization Required"`（nginx 默认），
+      // 而且不会带 `Docker-Distribution-Api-Version` 头 —— 这种地址怎么配凭据都拉不动，
+      // 提示用户"去配凭据"只会把人带偏。
+      if (!apiVersion) {
+        throw new RegistryError(
+          `该地址看起来不是镜像仓库（HTTP 401，且缺少 Docker-Distribution-Api-Version 头，` +
+            `认证方式是 ${response.headers.get('www-authenticate') || '未知'}）。` +
+            '这通常是"镜像站"的网站或反向代理，而不是 registry API 端点；' +
+            '请填真正的 registry 地址（例如镜像站实际承载镜像的那个域名）。',
+          'NOT_A_REGISTRY'
+        ).withOrigin(origin);
+      }
       const message =
         origin === 'source'
           ? sourceAuthMessage(401, this.#challengeInfo())

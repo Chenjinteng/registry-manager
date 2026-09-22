@@ -18,7 +18,8 @@
     "verify:token": "node scripts/verify-token-auth.mjs",
     "verify:location": "node scripts/verify-upload-location.mjs",
     "verify:ui": "node --experimental-strip-types --no-warnings scripts/verify-job-expansion.mjs",
-    "verify:pull": "node scripts/verify-pull.mjs"
+    "verify:pull": "node scripts/verify-pull.mjs",
+    "verify:real": "node scripts/verify-real-registries.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",
