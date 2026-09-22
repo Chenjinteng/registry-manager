@@ -7,7 +7,6 @@ import {
   Input,
   Modal,
   Popconfirm,
-  Radio,
   Space,
   Table,
   Tag,
@@ -37,7 +36,6 @@ import type {
   Credential,
   CredentialInput,
   CredentialPatch,
-  CredentialPurpose,
 } from '../types';
 import { formatDateTime } from '../utils';
 
@@ -50,15 +48,8 @@ interface FormValues {
   registryUrl: string;
   username: string;
   password?: string;
-  purpose: CredentialPurpose;
   note?: string;
 }
-
-const PURPOSE_LABEL: Record<CredentialPurpose, { label: string; color: string }> = {
-  source: { label: '源', color: 'blue' },
-  dest: { label: '目的', color: 'purple' },
-  both: { label: '源 + 目的', color: 'gold' },
-};
 
 export default function CredentialsPage({ config: initialConfig }: Props) {
   const { message, modal } = AntdApp.useApp();
@@ -100,7 +91,6 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
   const handleOpenCreate = () => {
     setEditing(null);
     form.resetFields();
-    form.setFieldsValue({ purpose: 'source' });
     setModalOpen(true);
   };
 
@@ -112,7 +102,6 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
       registryUrl: c.registryUrl,
       username: c.username,
       password: '',
-      purpose: c.purpose,
       note: c.note,
     });
     setModalOpen(true);
@@ -132,7 +121,6 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
           name: values.name,
           registryUrl: values.registryUrl,
           username: values.username,
-          purpose: values.purpose,
           note: values.note,
         };
         if (values.password && values.password.length > 0) {
@@ -154,7 +142,6 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
           registryUrl: values.registryUrl,
           username: values.username,
           password: values.password,
-          purpose: values.purpose,
           note: values.note,
         };
         const result = await createCredential(input);
@@ -217,21 +204,6 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
           ) : null}
         </Space>
       ),
-    },
-    {
-      title: '用途',
-      key: 'purpose',
-      width: 110,
-      render: (_, c) => {
-        const meta = PURPOSE_LABEL[c.purpose];
-        return <Tag color={meta.color}>{meta.label}</Tag>;
-      },
-      filters: [
-        { text: '源', value: 'source' },
-        { text: '目的', value: 'dest' },
-        { text: '源 + 目的', value: 'both' },
-      ],
-      onFilter: (value, record) => record.purpose === value,
     },
     {
       title: 'Registry URL',
@@ -353,7 +325,11 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
         <div>
           <h2 className="page-title">凭据管理</h2>
           <p className="page-subtitle">
-            管理外部 registry 的 basic auth 凭据。文件以 AES-256-GCM 加密落盘（密钥从{' '}
+            管理<strong>外部源</strong> registry 的 basic auth 凭据。本仓库自身的认证属于部署配置，
+            在 <span className="mono">registry.config.json</span>（或{' '}
+            <span className="mono">REGISTRY_USERNAME</span> /{' '}
+            <span className="mono">REGISTRY_PASSWORD</span>）里配置，不在这里管理。
+            文件以 AES-256-GCM 加密落盘（密钥从{' '}
             <span className="mono">REGISTRY_CREDENTIAL_KEY</span> 派生）；密钥与文件同时丢失 = 不可恢复。
           </p>
         </div>
@@ -434,13 +410,6 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
             extra="密码不会回显；落盘前以 AES-256-GCM 加密。"
           >
             <Input.Password autoComplete="new-password" placeholder="••••••" />
-          </Form.Item>
-          <Form.Item label="用途" name="purpose" rules={[{ required: true }]}>
-            <Radio.Group>
-              <Radio.Button value="source">源</Radio.Button>
-              <Radio.Button value="dest">目的</Radio.Button>
-              <Radio.Button value="both">源 + 目的</Radio.Button>
-            </Radio.Group>
           </Form.Item>
           <Form.Item label="备注（可选）" name="note">
             <Input placeholder="例如：仅个人 token / CI 用" />

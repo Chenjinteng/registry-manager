@@ -65,8 +65,6 @@ interface FormValues {
   sourceCredentialId?: string;
   sourceTempUsername?: string;
   sourceTempPassword?: string;
-  destAuthMode?: 'none' | 'credential';
-  destCredentialId?: string;
 }
 
 const POLL_INTERVAL_MS = 1500;
@@ -278,12 +276,6 @@ export default function PullPage({ config }: Props) {
       }
     }
 
-    // 目的端认证：只允许从凭据库选；不允许临时输入（目的端是本仓库，临时输入容易被误用）。
-    const destCredentialId =
-      values.destAuthMode === 'credential' && values.destCredentialId
-        ? values.destCredentialId
-        : undefined;
-
     // 打开预览 Modal，让用户看清将要做什么 + 预检，再真正入队。
     setPendingInput({
       sourceUrl: sourceUrlEffective,
@@ -292,7 +284,6 @@ export default function PullPage({ config }: Props) {
       // destTag 不再由用户填，留空让服务端沿用源 tag（同一套默认口径）。
       sourceProxy: values.sourceProxy?.trim() || undefined,
       sourceCredentialId,
-      destCredentialId,
       sourceAuthInline,
     });
   };
@@ -488,10 +479,25 @@ export default function PullPage({ config }: Props) {
             rules={[
               { required: true, message: '请填写镜像名' },
               {
-                validator: (_, value: string) =>
-                  value.includes(':')
-                    ? Promise.resolve()
-                    : Promise.reject(new Error('需要形如 <repo>:<tag>')),
+                validator: (_, value: string) => {
+                  // 不能用 `value.includes(':')` 判断：主机前缀里也有冒号
+                  // （`192.0.2.20:10001/library/alpine` 会被误判为"已有 tag"），
+                  // 于是提交后才被后端拒，报错还跟输入对不上。
+                  // 正解是先剥掉主机段，再看剩下部分有没有 tag。
+                  const parsed = parseImageReference(value ?? '');
+                  const ref = parsed.sourceRef;
+                  const colon = ref.lastIndexOf(':');
+                  const tag = colon >= 0 ? ref.slice(colon + 1) : '';
+                  if (!ref) {
+                    return Promise.reject(new Error('请填写镜像名'));
+                  }
+                  if (!tag || tag.includes('/')) {
+                    return Promise.reject(
+                      new Error('缺少 tag，请写成 <repo>:<tag>，例如 alpine:3.19')
+                    );
+                  }
+                  return Promise.resolve();
+                },
               },
             ]}
           >
@@ -571,9 +577,8 @@ export default function PullPage({ config }: Props) {
                       {({ getFieldValue }) => {
                         const mode = getFieldValue('sourceAuthMode');
                         if (mode === 'credential') {
-                          const sourceCandidates = credentials.filter(
-                            (c) => c.purpose === 'source' || c.purpose === 'both'
-                          );
+                          // 凭据库里全是外部源凭据，没有"用途"维度，直接全列。
+                          const sourceCandidates = credentials;
                           return (
                             <Form.Item
                               label="选择源凭据"
@@ -585,7 +590,7 @@ export default function PullPage({ config }: Props) {
                               <Select
                                 placeholder={
                                   sourceCandidates.length === 0
-                                    ? '凭据库里没有匹配的源端凭据'
+                                    ? '凭据库里还没有凭据，请先到「凭据管理」新增'
                                     : '选择凭据'
                                 }
                                 disabled={sourceCandidates.length === 0}
@@ -625,54 +630,6 @@ export default function PullPage({ config }: Props) {
                       }}
                     </Form.Item>
 
-                    <Form.Item
-                      label="目的认证"
-                      extra="目的端是当前管理的 registry。允许从凭据库选；不允许临时输入。"
-                    >
-                      <Input.Group compact>
-                        <Form.Item name="destAuthMode" noStyle initialValue="none">
-                          <Radio.Group optionType="button" buttonStyle="solid">
-                            <Radio.Button value="none">不用</Radio.Button>
-                            <Radio.Button value="credential">凭据库</Radio.Button>
-                          </Radio.Group>
-                        </Form.Item>
-                      </Input.Group>
-                    </Form.Item>
-
-                    <Form.Item
-                      noStyle
-                      shouldUpdate={(prev, current) =>
-                        prev.destAuthMode !== current.destAuthMode
-                      }
-                    >
-                      {({ getFieldValue }) => {
-                        const mode = getFieldValue('destAuthMode');
-                        if (mode !== 'credential') return null;
-                        const destCandidates = credentials.filter(
-                          (c) => c.purpose === 'dest' || c.purpose === 'both'
-                        );
-                        return (
-                          <Form.Item
-                            label="选择目的凭据"
-                            name="destCredentialId"
-                            rules={[{ required: true, message: '请选择一条凭据' }]}
-                          >
-                            <Select
-                              placeholder={
-                                destCandidates.length === 0
-                                  ? '凭据库里没有匹配的目的端凭据'
-                                  : '选择凭据'
-                              }
-                              disabled={destCandidates.length === 0}
-                              options={destCandidates.map((c) => ({
-                                value: c.id,
-                                label: `${c.name}（${c.username} @ ${c.registryUrl}）`,
-                              }))}
-                            />
-                          </Form.Item>
-                        );
-                      }}
-                    </Form.Item>
                   </>
                 ),
               },
@@ -766,6 +723,7 @@ export default function PullPage({ config }: Props) {
       <PullPreviewModal
         input={pendingInput}
         host={config?.host ?? ''}
+        usingAuth={Boolean(config?.usingAuth)}
         credentials={credentials}
         onConfirm={handleConfirmCreate}
         onCancel={handleCancelPreview}
@@ -785,6 +743,7 @@ export default function PullPage({ config }: Props) {
 function PullPreviewModal({
   input,
   host,
+  usingAuth,
   credentials,
   onConfirm,
   onCancel,
@@ -793,6 +752,8 @@ function PullPreviewModal({
   input: PullJobInput | null;
   /** 本仓库的 host[:port]，用于拼出完整的目的引用。 */
   host: string;
+  /** 本仓库是否配了 basic auth（来自服务配置，任务级不可改）。 */
+  usingAuth: boolean;
   credentials: Credential[];
   onConfirm: () => void;
   onCancel: () => void;
@@ -893,9 +854,18 @@ function PullPreviewModal({
               </span>
             </Descriptions.Item>
             <Descriptions.Item label="目的认证">
-              {input.destCredentialId
-                ? `${resolveCredentialLabel(input.destCredentialId, credentials)}（凭据库）`
-                : '不使用'}
+              {usingAuth ? (
+                <span>
+                  <Tag color="blue">已配置</Tag>
+                  <span style={{ color: 'var(--color-text-3)' }}>
+                    来自 registry.config.json / REGISTRY_USERNAME，所有本仓库请求自动携带
+                  </span>
+                </span>
+              ) : (
+                <span style={{ color: 'var(--color-text-3)' }}>
+                  未配置（匿名访问本仓库）
+                </span>
+              )}
             </Descriptions.Item>
           </Descriptions>
 

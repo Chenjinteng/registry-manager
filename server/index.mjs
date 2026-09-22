@@ -25,7 +25,16 @@ import { CredentialStore, pickCredentialPublic, assertCredentialUsable } from '.
 import { resolve as resolvePath, join } from 'node:path';
 
 const config = loadConfig();
-const client = new RegistryClient({ url: config.url, proxy: config.proxy });
+/**
+ * 全局 client：本 registry 的认证来自配置（env 或 registry.config.json），
+ * 因此**所有**对本仓库的读写（盘点、删除、拉取时的 mount / blob / manifest PUT）
+ * 都自动带上同一份凭据 —— 拉取任务里不再需要单独选目的凭据。
+ */
+const client = new RegistryClient({
+  url: config.url,
+  proxy: config.proxy,
+  auth: config.username ? { username: config.username, password: config.password } : undefined,
+});
 const inventory = new Inventory(client, { ttlSeconds: config.cacheTtlSeconds });
 
 /**
@@ -104,6 +113,8 @@ app.get('/api/config', (req, res) => {
       url: config.url,
       host: client.host,
       usingProxy: Boolean(config.proxy),
+      /** 是否给本 registry 配了 basic auth（只暴露布尔，密码绝不出接口）。 */
+      usingAuth: Boolean(config.username),
       cacheTtlSeconds: config.cacheTtlSeconds,
       allowDelete: config.allowDelete,
       allowPull: config.allowPull,
@@ -234,19 +245,12 @@ app.post('/api/pull/jobs', ensurePullAllowed, async (req, res) => {
       destRepo: String(body.destRepo ?? ''),
       destTag: body.destTag ? String(body.destTag) : '',
       sourceCredentialId: body.sourceCredentialId ? String(body.sourceCredentialId) : '',
-      destCredentialId: body.destCredentialId ? String(body.destCredentialId) : '',
       // 临时 inline 凭据：不落库；只在这一次任务的 runner 内使用。
       // 安全前提：网络层 HTTPS / 代理可信，HTTP body 仅在反向代理 / 进程内存中。
       sourceAuthInline: body.sourceAuthInline
         ? {
             username: String(body.sourceAuthInline.username ?? ''),
             password: String(body.sourceAuthInline.password ?? ''),
-          }
-        : undefined,
-      destAuthInline: body.destAuthInline
-        ? {
-            username: String(body.destAuthInline.username ?? ''),
-            password: String(body.destAuthInline.password ?? ''),
           }
         : undefined,
     });
@@ -281,7 +285,7 @@ app.post('/api/pull/probe', ensurePullAllowed, async (req, res) => {
       return;
     }
     try {
-      assertCredentialUsable(c, 'source', rawUrl);
+      assertCredentialUsable(c, rawUrl);
     } catch (error) {
       fail(res, error);
       return;
@@ -289,19 +293,23 @@ app.post('/api/pull/probe', ensurePullAllowed, async (req, res) => {
     auth = { username: c.username, password: c.password };
   }
   try {
-    const client = new RegistryClient({ url: rawUrl, proxy, auth });
-    const probe = await client.probe({ origin: 'source' });
-    const data = { ...probe, sourceUrl: client.baseUrl, usingProxy: Boolean(proxy) };
+    // 注意命名：下面用的是**源端** client；探测目标 tag 现状必须用模块级的
+    // `client`（本仓库，带配置里的凭据），否则会去源 registry 上查目标仓库，
+    // 得出完全错误的"是否已存在 / 会不会被替换"结论。
+    const sourceClient = new RegistryClient({ url: rawUrl, proxy, auth });
+    const probe = await sourceClient.probe({ origin: 'source' });
+    const data = { ...probe, sourceUrl: sourceClient.baseUrl, usingProxy: Boolean(proxy) };
 
     // 目标 tag 现状：解析入参（destRepo/destTag 都允许缺省，与创建任务同一套默认）。
     const destInfo = resolveDestReference(body);
     if (destInfo) {
       data.dest = destInfo;
       try {
-        const sourceManifest = await client.probeManifest(destInfo.sourceRepo, destInfo.sourceTag, {
-          origin: 'source',
-          dispatcher: client.dispatcher,
-        });
+        const sourceManifest = await sourceClient.probeManifest(
+          destInfo.sourceRepo,
+          destInfo.sourceTag,
+          { origin: 'source', dispatcher: sourceClient.dispatcher }
+        );
         const destManifest = await client.probeManifest(destInfo.destRepo, destInfo.destTag, {
           origin: 'dest',
         });
@@ -488,12 +496,11 @@ app.post('/api/credentials/:id/test', ensureCredentialsAvailable, async (req, re
       url: c.registryUrl,
       auth: { username: c.username, password: c.password },
     });
-    const probe = await client.probe({ origin: c.purpose === 'dest' ? 'dest' : 'source' });
+    const probe = await client.probe({ origin: 'source' });
     ok(res, {
       data: {
         ...probe,
         registryUrl: c.registryUrl,
-        purpose: c.purpose,
       },
     });
   } catch (error) {

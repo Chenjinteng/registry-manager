@@ -90,11 +90,11 @@ function sourceAuthMessage(status) {
 function destAuthMessage(status, destRepo) {
   if (status === 401) {
     return (
-      `目的 registry 要求认证（HTTP 401）。请在任务的「高级选项 → 目的认证」中选择一条凭据，` +
-      `或在「凭据管理」中为本仓库地址新增一条。`
+      `本 registry 要求认证（HTTP 401）。这是部署级配置，请在 registry.config.json 里填 ` +
+      `username / password，或设置环境变量 REGISTRY_USERNAME / REGISTRY_PASSWORD 后重启服务。`
     );
   }
-  return `目的 registry 拒绝写入 ${destRepo}（HTTP 403）：账号可能没有推送权限。`;
+  return `本 registry 拒绝写入 ${destRepo}（HTTP 403）：该账号可能没有推送权限。`;
 }
 
 export class RegistryClient {
@@ -245,7 +245,7 @@ export class RegistryClient {
           ? sourceAuthMessage(401)
           : origin === 'dest'
           ? destAuthMessage(401, this.host)
-          : '镜像仓库要求认证（HTTP 401）。如需认证，请在「凭据管理」中新增凭据后在任务里选用。';
+          : '镜像仓库要求认证（HTTP 401）：本仓库的凭据在 registry.config.json / REGISTRY_USERNAME 里配置，外部源的凭据在「凭据管理」里维护。';
       throw new RegistryError(message, 'UNAUTHORIZED').withOrigin(origin);
     }
     if (!response.ok) {

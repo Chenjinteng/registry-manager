@@ -31,6 +31,9 @@ services:
       REGISTRY_NAME: ${REGISTRY_NAME:-镜像仓库}
       # 留空 = 直连
       REGISTRY_PROXY: ${REGISTRY_PROXY:-}
+      # 本 registry 自身的 basic auth（部署级；不填 = 匿名访问）
+      REGISTRY_USERNAME: ${REGISTRY_USERNAME:-}
+      REGISTRY_PASSWORD: ${REGISTRY_PASSWORD:-}
       REGISTRY_CACHE_TTL_SECONDS: ${REGISTRY_CACHE_TTL_SECONDS:-60}
       # 设为 false 进入只读模式：隐藏删除入口并拒绝所有删除请求
       REGISTRY_ALLOW_DELETE: ${REGISTRY_ALLOW_DELETE:-true}

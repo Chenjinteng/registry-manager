@@ -26,13 +26,15 @@ const IV_BYTES = 12;
 const AUTH_TAG_BYTES = 16;
 
 /**
- * @typedef {'source' | 'dest' | 'both'} CredentialPurpose
+ * 凭据库只存**外部源**的 basic auth。
+ *
+ * 本 registry 自身的凭据属于部署配置（没有它连镜像列表都打不开），
+ * 放在 config.mjs 里，不由这里管理 —— 因此没有"用途"这个维度。
  *
  * @typedef {object} Credential
  * @property {string} id
  * @property {string} name
  * @property {string} registryUrl
- * @property {CredentialPurpose} purpose
  * @property {string} username
  * @property {string} password
  * @property {string} [note]
@@ -43,7 +45,6 @@ const AUTH_TAG_BYTES = 16;
  * @property {string} id
  * @property {string} name
  * @property {string} registryUrl
- * @property {CredentialPurpose} purpose
  * @property {string} username
  * @property {boolean} hasPassword
  * @property {string} [note]
@@ -98,7 +99,6 @@ function validateCredentialInput(input) {
   const registryUrl = String(input?.registryUrl ?? '').trim();
   const username = String(input?.username ?? '').trim();
   const password = String(input?.password ?? '');
-  const purpose = input?.purpose ?? 'both';
   const note = input?.note ? String(input.note) : undefined;
 
   if (!name) {
@@ -113,10 +113,7 @@ function validateCredentialInput(input) {
   if (password && password.length < 1) {
     throw new RegistryError('密码不能为空字符串', 'INVALID_REQUEST');
   }
-  if (!['source', 'dest', 'both'].includes(purpose)) {
-    throw new RegistryError('purpose 必须是 source / dest / both 之一', 'INVALID_REQUEST');
-  }
-  return { name, registryUrl, username, password, purpose, note };
+  return { name, registryUrl, username, password, note };
 }
 
 /**
@@ -220,18 +217,14 @@ export class CredentialStore {
   }
 
   /**
-   * 按 registryUrl 严格匹配返回第一条；用途筛选后没有命中返回 null。
-   * 注意：这里**不**用于任务自动应用（那个决策在路由层做），仅供显式选择路径使用。
+   * 按 registryUrl 严格匹配返回第一条；没有命中返回 null。
+   * 注意：任务不会自动套用凭据（必须显式选），这里仅供显式选择路径使用。
    */
-  findByUrl(url, purpose) {
+  findByUrl(url) {
     const target = String(url ?? '').trim().replace(/\/+$/, '');
     const all = this.#readAll();
     return (
-      all.find(
-        (c) =>
-          c.registryUrl.replace(/\/+$/, '') === target &&
-          (purpose ? c.purpose === purpose || c.purpose === 'both' : true)
-      ) ?? null
+      all.find((c) => c.registryUrl.replace(/\/+$/, '') === target) ?? null
     );
   }
 
@@ -246,7 +239,6 @@ export class CredentialStore {
       registryUrl: validated.registryUrl.replace(/\/+$/, ''),
       username: validated.username,
       password: validated.password,
-      purpose: validated.purpose,
       note: validated.note,
       createdAt: now,
       updatedAt: now,
@@ -289,12 +281,6 @@ export class CredentialStore {
       }
       next.password = p;
     }
-    if (patch?.purpose !== undefined) {
-      if (!['source', 'dest', 'both'].includes(patch.purpose)) {
-        throw new RegistryError('purpose 必须是 source / dest / both 之一', 'INVALID_REQUEST');
-      }
-      next.purpose = patch.purpose;
-    }
     if (patch?.note !== undefined) {
       next.note = patch.note ? String(patch.note) : undefined;
     }
@@ -327,7 +313,6 @@ export function pickCredentialPublic(c) {
     id: c.id,
     name: c.name,
     registryUrl: c.registryUrl,
-    purpose: c.purpose,
     username: c.username,
     hasPassword: Boolean(c.password),
     note: c.note,
@@ -342,29 +327,23 @@ function normalizeUrl(url) {
 }
 
 /**
- * 校验一条凭据能否用于指定方向与目标地址；不能则抛 RegistryError。
+ * 校验一条凭据能否用于目标源地址；不能则抛 RegistryError。
  *
+ * 凭据只用于外部源，所以唯一的判定就是「registryUrl 必须严格匹配」。
  * 入队时（同步）与执行时（runner 内）共用这一份判定，
  * 避免"入队成功、执行立刻失败"这种让用户白点一次确认的体验。
  *
  * @param {Credential} credential
- * @param {'source' | 'dest'} purpose
- * @param {string} targetUrl 实际要访问的 registry 地址
+ * @param {string} targetUrl 实际要访问的源 registry 地址
  */
-export function assertCredentialUsable(credential, purpose, targetUrl) {
-  const side = purpose === 'source' ? '源' : '目的';
-  if (credential.purpose !== purpose && credential.purpose !== 'both') {
-    throw new RegistryError(`凭据「${credential.name}」未启用为「${side}」用途`, 'INVALID_REQUEST').withOrigin(
-      purpose
-    );
-  }
+export function assertCredentialUsable(credential, targetUrl) {
   const target = normalizeUrl(targetUrl);
   const stored = normalizeUrl(credential.registryUrl);
   if (target !== stored) {
     throw new RegistryError(
-      `凭据「${credential.name}」的 registryUrl（${stored}）与实际${side}地址（${target}）不一致，已拒绝使用`,
+      `凭据「${credential.name}」的 registryUrl（${stored}）与实际源地址（${target}）不一致，已拒绝使用`,
       'CREDENTIAL_URL_MISMATCH'
-    ).withOrigin(purpose);
+    ).withOrigin('source');
   }
 }
 

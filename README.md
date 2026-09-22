@@ -70,6 +70,8 @@ docker compose up -d --build
 | --- | --- | --- |
 | `REGISTRY_URL` | 无（必填） | 要管理的 registry 地址 |
 | `REGISTRY_PROXY` | 空 | 访问 registry 的 HTTP 代理；留空直连 |
+| `REGISTRY_USERNAME` | 空 | 本 registry 自身的 basic auth 用户名；留空 = 匿名 |
+| `REGISTRY_PASSWORD` | 空 | 本 registry 自身的 basic auth 密码 |
 | `REGISTRY_NAME` | `镜像仓库` | 展示名称 |
 | `REGISTRY_CACHE_TTL_SECONDS` | `60` | 清单缓存时长 |
 | `REGISTRY_ALLOW_DELETE` | `true` | `false` = 只读模式，拒绝所有删除 |
@@ -177,6 +179,8 @@ docker push 192.0.2.10:10001/example/registry-manager:0.2.0
 | `name` | `REGISTRY_NAME` | `镜像仓库` | 展示名称 |
 | `url` | `REGISTRY_URL` | 无（必填） | registry 地址，须带 `http://` 或 `https://` |
 | `proxy` | `REGISTRY_PROXY` | 空 | 访问 registry 需要经过的 HTTP 代理 |
+| `username` | `REGISTRY_USERNAME` | 空 | 本 registry 自身的 basic auth 用户名 |
+| `password` | `REGISTRY_PASSWORD` | 空 | 本 registry 自身的 basic auth 密码（不回显到任何接口） |
 | `cacheTtlSeconds` | `REGISTRY_CACHE_TTL_SECONDS` | `60` | 清单缓存时长 |
 | `allowDelete` | `REGISTRY_ALLOW_DELETE` | `true` | 设为 `false` 进入只读模式，服务端拒绝一切删除 |
 | `allowPull` | `REGISTRY_ALLOW_PULL` | `true` | 设为 `false` 后服务端拒绝一切 `/api/pull/*` 写入 |
@@ -276,10 +280,26 @@ docker push 192.0.2.10:10001/example/registry-manager:0.2.0
 `allowPull: false`（环境变量 `REGISTRY_ALLOW_PULL=false`）可以一键关闭写入，
 GET 列表仍可读，便于运维查看历史任务。
 
-### 凭据管理（私有 registry 认证）
+### 认证怎么配：分两处，不要混
 
-页面顶部多了 `凭据管理` 页签。源 / 目的端都可以从凭据库选 basic auth，
-也能在任务表单里临时输入账号密码（**不写入凭据库**）。
+按凭据的**作用对象**分成两处，这是刻意的：
+
+| 凭据 | 配在哪 | 为什么 |
+| --- | --- | --- |
+| **本 registry 自身**（工具要管理的那个） | `registry.config.json` 的 `username` / `password`，或环境变量 `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | 这是**部署级**凭据：没有它连「镜像列表」都打不开，所以服务启动时就必须具备。它作用于**所有**对本仓库的请求（盘点、删除、拉取时的 mount / blob / manifest 落库），因此没有"每个任务选一次"的意义。 |
+| **外部源 registry**（要去拉镜像的地方） | 页面上的「凭据管理」 | 源是**任务级**的：同一个源可以拉很多次，也可能有多个源。所以放进可增删改的凭据库，任务里按需选用。 |
+
+因此任务表单里**只有「源认证」**，没有「目的认证」；凭据库里也**没有"用途"维度**——里面全是源凭据。
+
+本仓库的凭据只以布尔形式暴露给页面（`usingAuth`），密码不会出现在任何接口响应里。
+
+### 凭据管理（外部源认证）
+
+`凭据管理` 页签维护外部源的 basic auth。任务表单里可以：
+
+- 从凭据库**选一条**（按 registryUrl 严格匹配，不一致会被拒绝）；
+- **临时输入**账号密码 —— **不写入凭据库**、不回显、不进任务历史；
+- 或者**不用**（匿名源）。
 
 凭据库本身是 AES-256-GCM 加密的 JSON 文件，路径默认 `/app/data/credentials.json`
 （建议在 compose 里挂卷持久化）。密钥走环境变量 `REGISTRY_CREDENTIAL_KEY`，
@@ -287,11 +307,6 @@ scrypt 派生；密钥与文件**同时丢失 = 凭据永久不可恢复**，运
 
 启动时如果没设置 `REGISTRY_CREDENTIAL_KEY`，服务仍可启动并支持匿名拉取，
 但凭据管理页会显示警告、相关 API 返回 `CREDENTIAL_KEY_MISSING`。
-
-任务表单里两个相关字段：
-
-- **源认证**：从凭据库选 / 临时输入账号密码 / 不使用；
-- **目的认证**：从凭据库选 / 不使用（不允许临时输入，避免误把别人的密码落到本仓库）。
 
 临时输入模式下，预览 Modal 不会做认证连通测试（密码不在凭据库、服务端拿不到）；
 但任务真正开始时会带上账号密码去连源。

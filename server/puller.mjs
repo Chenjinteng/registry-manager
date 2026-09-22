@@ -155,20 +155,20 @@ class PullJobRunner {
   }
 
   /**
-   * 按凭据 id 取认证信息（账号 / 密码）。
+   * 按凭据 id 取源的认证信息（账号 / 密码）。
    *
    * 校验与入队时共用 `assertCredentialUsable`；这里是纵深防御 ——
-   * 万一任务入队后凭据被改写（改 url / 改用途），执行时仍会被拦下。
+   * 万一任务入队后凭据被改写（改了 registryUrl），执行时仍会被拦下。
    */
-  #resolveAuth(credentialId, purpose, registryUrl) {
+  #resolveSourceAuth(credentialId, sourceUrl) {
     if (!credentialId) {
       return undefined;
     }
     const credential = this.credentialStore?.get(credentialId);
     if (!credential) {
-      throw new RegistryError(`凭据不存在：${credentialId}`, 'JOB_NOT_FOUND').withOrigin(purpose);
+      throw new RegistryError(`凭据不存在：${credentialId}`, 'JOB_NOT_FOUND').withOrigin('source');
     }
-    assertCredentialUsable(credential, purpose, registryUrl);
+    assertCredentialUsable(credential, sourceUrl);
     return { username: credential.username, password: credential.password };
   }
 
@@ -179,9 +179,9 @@ class PullJobRunner {
   async run() {
     const { job } = this;
     const { sourceUrl, sourceProxy } = job;
-    // 源端认证：优先凭据库（按 id 校验 url / 用途），回落到任务自带的临时 inline 账号密码。
+    // 源端认证：优先凭据库（按 id 校验 registryUrl），回落到任务自带的临时 inline 账号密码。
     const sourceAuth = job.sourceCredentialId
-      ? this.#resolveAuth(job.sourceCredentialId, 'source', job.sourceUrl)
+      ? this.#resolveSourceAuth(job.sourceCredentialId, job.sourceUrl)
       : job.sourceAuthInline;
     const sourceClient = new RegistryClient({
       url: sourceUrl,
@@ -189,23 +189,8 @@ class PullJobRunner {
       auth: sourceAuth,
     });
 
-    // 目的端：优先凭据库，回落到任务自带的临时 inline 账号密码；都没有则沿用构造时的。
-    //
-    // 必须把结果写回 this.destClient —— #copyBlob / manifest 落库都读 this.destClient，
-    // 只算一个局部变量会让凭据在此后的所有目的端请求上失效（第一个 mount 就是裸请求 → 401）。
-    const destAuth = job.destCredentialId
-      ? this.#resolveAuth(job.destCredentialId, 'dest', this.destClient.baseUrl)
-      : job.destAuthInline;
-    const destClient = destAuth
-      ? new RegistryClient({
-          url: this.destClient.baseUrl,
-          proxy: '',
-          dispatcher: this.destClient.dispatcher,
-          auth: destAuth,
-        })
-      : this.destClient;
-    this.destClient = destClient;
-
+    // 目的端不做任务级覆盖：本 registry 的凭据属于部署配置，
+    // 已在构造 destClient 时注入（见 index.mjs），#copyBlob / 落库都直接用 this.destClient。
     job.status = 'running';
     job.startedAt = new Date().toISOString();
 
@@ -300,7 +285,7 @@ class PullJobRunner {
 
     // 4) manifest 落库
     this.#ensureNotCancelled();
-    const putResult = await destClient.putDestManifest(
+    const putResult = await this.destClient.putDestManifest(
       job.destRepo,
       job.destTag,
       manifestBody,
@@ -398,9 +383,7 @@ export class PullQueue {
     destRepo,
     destTag,
     sourceCredentialId,
-    destCredentialId,
     sourceAuthInline,
-    destAuthInline,
   }) {
     const validated = validateInputs({ sourceRef, destRepo, destTag });
     let normalizedSourceUrl;
@@ -420,9 +403,9 @@ export class PullQueue {
         );
       }
     }
-    // 校验凭据可用性（存在 + 用途 + url 严格匹配）。
+    // 校验源凭据可用性（存在 + registryUrl 严格匹配）。
     // 放在入队时做，而不是等到 runner 执行：否则用户点了「确认入队」才失败，白点一次。
-    if ((sourceCredentialId || destCredentialId) && !this.credentialStore) {
+    if (sourceCredentialId && !this.credentialStore) {
       throw new RegistryError(
         '本次任务引用了凭据，但服务端未配置凭据库（缺少 REGISTRY_CREDENTIAL_KEY）。请重启服务并设置该环境变量，或改用匿名 / 临时输入。',
         'CREDENTIAL_KEY_MISSING'
@@ -433,18 +416,10 @@ export class PullQueue {
       if (!c) {
         throw new RegistryError(`源凭据不存在：${sourceCredentialId}`, 'JOB_NOT_FOUND').withOrigin('source');
       }
-      assertCredentialUsable(c, 'source', normalizedSourceUrl);
-    }
-    if (destCredentialId) {
-      const c = this.credentialStore?.get(destCredentialId);
-      if (!c) {
-        throw new RegistryError(`目的凭据不存在：${destCredentialId}`, 'JOB_NOT_FOUND').withOrigin('dest');
-      }
-      assertCredentialUsable(c, 'dest', this.client.baseUrl);
+      assertCredentialUsable(c, normalizedSourceUrl);
     }
     // inline 临时账号密码：不在凭据库中存在，但同样不进 PullJob 历史。
     const sourceAuth = sanitizeInlineAuth(sourceAuthInline, 'source');
-    const destAuth = sanitizeInlineAuth(destAuthInline, 'dest');
     const jobId = randomUUID();
     const job = {
       id: jobId,
@@ -456,9 +431,7 @@ export class PullQueue {
       destRepo: validated.destRepo,
       destTag: validated.destTag,
       sourceCredentialId: sourceCredentialId || undefined,
-      destCredentialId: destCredentialId || undefined,
       sourceAuthInline: sourceAuth,
-      destAuthInline: destAuth,
       status: 'queued',
       bytes: 0,
       totalBytes: null,
@@ -484,9 +457,7 @@ export class PullQueue {
     destRepo,
     destTag,
     sourceCredentialId,
-    destCredentialId,
     sourceAuthInline,
-    destAuthInline,
   }) {
     const job = this.#createJobRecord({
       sourceUrl,
@@ -495,9 +466,7 @@ export class PullQueue {
       destRepo,
       destTag,
       sourceCredentialId,
-      destCredentialId,
       sourceAuthInline,
-      destAuthInline,
     });
     this.#jobs.set(job.id, job);
     this.#waiting.push(job.id);
@@ -664,11 +633,11 @@ function sanitizeInlineAuth(input, origin) {
 }
 
 /**
- * 任务对象对外暴露时去掉 inline 凭据（保留 credentialId 给前端显示"用的是哪条凭据"）。
+ * 任务对象对外暴露时去掉 inline 凭据（保留 sourceCredentialId 给前端显示"用的是哪条凭据"）。
  * inline 凭据只活到 runner.run() 内部。
  */
 function stripInlineAuth(job) {
   if (!job) return job;
-  const { sourceAuthInline, destAuthInline, ...rest } = job;
+  const { sourceAuthInline, ...rest } = job;
   return rest;
 }

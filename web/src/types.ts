@@ -39,6 +39,8 @@ export interface AppConfig {
   url: string;
   host: string;
   usingProxy: boolean;
+  /** 是否给本 registry 配了 basic auth（密码不会回传）。 */
+  usingAuth: boolean;
   cacheTtlSeconds: number;
   /** false 时服务端会拒绝删除请求，页面也要隐藏删除入口。 */
   allowDelete: boolean;
@@ -100,7 +102,6 @@ export interface PullJob {
   /** 'source' | 'dest' | undefined。区分错误发生在源还是目的端。 */
   errorOrigin?: 'source' | 'dest';
   sourceCredentialId?: string;
-  destCredentialId?: string;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
@@ -113,10 +114,8 @@ export interface PullJobInput {
   destRepo: string;
   destTag?: string;
   sourceCredentialId?: string;
-  destCredentialId?: string;
-  /** 临时 inline 凭据：不落库，仅当次任务使用。 */
+  /** 临时 inline 凭据：不落库，仅当次任务使用。目的端凭据来自服务配置，不在此处。 */
   sourceAuthInline?: { username: string; password: string };
-  destAuthInline?: { username: string; password: string };
 }
 
 /**
@@ -142,13 +141,15 @@ export interface DestStatus {
   probeError?: string;
 }
 
-export type CredentialPurpose = 'source' | 'dest' | 'both';
-
+/**
+ * 凭据库只存**外部源**的 basic auth。
+ * 本 registry 自身的凭据属于部署配置（registry.config.json / REGISTRY_USERNAME），
+ * 因此这里没有"用途"维度。
+ */
 export interface Credential {
   id: string;
   name: string;
   registryUrl: string;
-  purpose: CredentialPurpose;
   username: string;
   /** 是否设置过密码；密码本身不会回传到前端。 */
   hasPassword: boolean;
@@ -162,7 +163,6 @@ export interface CredentialInput {
   registryUrl: string;
   username: string;
   password: string;
-  purpose: CredentialPurpose;
   note?: string;
 }
 
@@ -172,6 +172,5 @@ export interface CredentialPatch {
   username?: string;
   /** 传空字符串视为不更新密码；省略同空。 */
   password?: string;
-  purpose?: CredentialPurpose;
   note?: string;
 }

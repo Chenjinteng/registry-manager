@@ -253,7 +253,7 @@ const dstRepos = {};
 const src = await listen(makeRegistry({ expectedAuth: SRC_AUTH, repos: srcRepos, seen: srcSeen, label: 'src' }));
 const dst = await listen(makeRegistry({ expectedAuth: DST_AUTH, repos: dstRepos, seen: dstSeen, label: 'dst' }));
 
-// ---------------- 凭据库（走真实加密存储） ----------------
+// ---------------- 凭据库（只存外部源凭据，走真实加密存储） ----------------
 const storePath = `/tmp/verify-pull-${Date.now()}.json`;
 const store = new CredentialStore({ filePath: storePath, masterKey: 'verify-pull-master-key-0123456789' });
 const srcCred = await store.create({
@@ -261,19 +261,16 @@ const srcCred = await store.create({
   registryUrl: src.url,
   username: SRC_USER,
   password: SRC_PASS,
-  purpose: 'source',
-});
-const dstCred = await store.create({
-  name: '目的凭据',
-  registryUrl: dst.url,
-  username: DST_USER,
-  password: DST_PASS,
-  purpose: 'dest',
 });
 
 // ---------------- 用真实 PullQueue 拉一次 ----------------
+// 目的端凭据属于**部署配置**（本 registry 的认证），在构造 client 时注入，
+// 不再作为任务级选项 —— 这里模拟 index.mjs 从 config 读取后的装配方式。
 const queue = new PullQueue({
-  client: new RegistryClient({ url: dst.url }),
+  client: new RegistryClient({
+    url: dst.url,
+    auth: { username: DST_USER, password: DST_PASS },
+  }),
   credentialStore: store,
   historyLimit: 5,
 });
@@ -284,7 +281,6 @@ const job = queue.enqueue({
   destRepo: 'lib/demo',
   destTag: 'v1',
   sourceCredentialId: srcCred.id,
-  destCredentialId: dstCred.id,
 });
 
 const finished = await new Promise((resolve, reject) => {

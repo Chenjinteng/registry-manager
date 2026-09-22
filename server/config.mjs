@@ -15,6 +15,15 @@ const DEFAULTS = {
   name: '镜像仓库',
   url: '',
   proxy: '',
+  /**
+   * 本 registry 自身的 basic auth。
+   *
+   * 放在配置而不是凭据库里，理由是：这是**部署级**凭据 —— 连不上就无法列镜像、
+   * 无法盘点，所以必须在服务启动时就具备；把它做成任务级选项没有意义
+   * （没有它连「镜像列表」都打不开）。凭据库只负责**外部源**。
+   */
+  username: '',
+  password: '',
   cacheTtlSeconds: 60,
   allowDelete: true,
   port: 8787,
@@ -42,6 +51,24 @@ function toPositiveInt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/**
+ * 取值优先级：env（**存在即生效，哪怕是空串**）> 配置文件 > 默认值。
+ *
+ * 对 `proxy` / `username` / `password` 这类"空值是一个有意义的选择"的字段，
+ * 不能用 `env || file`：那样 `REGISTRY_PROXY=` 会被当成"没设置"而回落成
+ * 配置文件里的代理，与 README 写的"环境变量 > 配置文件""留空 = 直连"矛盾，
+ * 排查时会很迷惑（明明清空了代理，请求还在走代理）。
+ */
+function pickEnvOrFile(envValue, fileValue, fallback) {
+  if (envValue !== undefined) {
+    return envValue;
+  }
+  if (fileValue !== undefined) {
+    return fileValue;
+  }
+  return fallback;
+}
+
 /** 只把显式的假值当作关闭；未配置时沿用默认。 */
 function toBoolean(value, fallback) {
   if (value === undefined || value === null || value === '') {
@@ -58,7 +85,13 @@ export function loadConfig() {
   const config = {
     name: process.env.REGISTRY_NAME || file.name || DEFAULTS.name,
     url: (process.env.REGISTRY_URL || file.url || DEFAULTS.url).trim(),
-    proxy: (process.env.REGISTRY_PROXY || file.proxy || DEFAULTS.proxy).trim(),
+    // proxy / 认证三项允许"显式置空"来覆盖配置文件里的值（空 = 直连 / 匿名）。
+    proxy: String(pickEnvOrFile(process.env.REGISTRY_PROXY, file.proxy, DEFAULTS.proxy)).trim(),
+    username: String(
+      pickEnvOrFile(process.env.REGISTRY_USERNAME, file.username, DEFAULTS.username)
+    ).trim(),
+    // 密码只从 env 或配置文件读；**绝不回显到任何接口**。
+    password: String(pickEnvOrFile(process.env.REGISTRY_PASSWORD, file.password, DEFAULTS.password)),
     cacheTtlSeconds: toPositiveInt(
       process.env.REGISTRY_CACHE_TTL_SECONDS || file.cacheTtlSeconds,
       DEFAULTS.cacheTtlSeconds
