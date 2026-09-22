@@ -351,28 +351,61 @@ scrypt 派生；密钥与文件**同时丢失 = 凭据永久不可恢复**，运
 代理的 basic auth 会以 `Proxy-Authorization` 发出；密码里的特殊字符（`@` `:` `/`）
 会正确 URL 编码。匿名代理不发这个头。
 
-### 凭据库显示"不可用"时怎么排查
+### 数据目录不可用时怎么排查
 
-页面会区分两种失败，**先看它给的是哪一种**：
+凭据库与代理库共用同一个目录，页面会区分两种失败，**先看它给的是哪一种**：
 
 | 页面提示 | 含义 | 怎么办 |
 | --- | --- | --- |
 | 未配置 `REGISTRY_CREDENTIAL_KEY` | 环境变量确实没读到 | 补上环境变量后重启 |
-| 凭据库初始化失败（`CREDENTIAL_STORE_INIT_FAILED`） | **密钥已读到**，问题在凭据目录 | 见下 |
+| 加密存储初始化失败（`CREDENTIAL_STORE_INIT_FAILED`） | **密钥已读到**，问题在数据目录 | 见下 |
 
-第二种几乎都是**目录不可写**。容器里服务以非 root 的 `node` 用户（uid 1000）运行，
-而 `/app` 属主是 root，所以它无法在 `/app` 下自己创建 `/app/data`：
+第二种都是**目录不可用**。服务启动时会主动往目录里写一个探针文件来验证可写性
+（不是等第一次新增凭据才失败），报错里直接给出目录、进程 uid 和修法：
 
 ```
-凭据库初始化失败：EPERM: operation not permitted, mkdir '/app/data'
+数据目录不可用：/app/data
+  原因：EPERM EPERM: operation not permitted, mkdir '/app/data'
+  当前进程身份：uid=1000 gid=1000
+  该目录必须【存在】且对上面这个 uid 可写。按部署方式挑一条：
+  ...
 ```
 
-镜像已通过 `RUN mkdir -p /app/data && chown node:node /app/data` 预先建好该目录，
-**用旧镜像会一直报这个错，需要重新构建**。用 bind mount 时宿主机目录属主也必须是
-uid 1000，否则同样失败；`docker-compose.yml` 默认用的是命名卷，首次挂载会沿用镜像里的属主。
+先在容器里跑这几条确认现场：
 
-想先不改镜像、立刻验证密钥是否正确，可以把它指到一个 node 用户可写的临时路径
-（**不持久化**，容器重建即丢）：
+```bash
+docker compose exec registry-manager id
+docker compose exec registry-manager ls -ld /app/data
+docker compose exec registry-manager sh -c 'touch /app/data/.probe && echo 可写 || echo 不可写'
+```
+
+按部署方式挑一条修：
+
+**1. 用的还是旧镜像**（最常见）。镜像已通过
+`RUN mkdir -p /app/data && chown node:node /app/data` 预建好该目录，旧镜像里没有：
+
+```bash
+docker compose up -d --build
+```
+
+**2. 命名卷是早先用旧镜像建出来的**，挂载点上没有镜像里的目录，Docker 就按 root 建了。
+这时重新构建镜像也**不会**改已有卷的属主（Docker 只在卷首次创建时拷贝属主）。
+卷里本来就没数据，删掉重建：
+
+```bash
+docker compose down
+docker volume ls | grep registry-manager     # 找到卷名
+docker volume rm <上面那个卷名>
+docker compose up -d
+```
+
+**3. 用了 bind mount**，宿主机目录的属主必须是容器内的 uid 1000：
+
+```bash
+sudo chown -R 1000:1000 ./data
+```
+
+**4. 只想先跑起来**（**不持久化**，容器重建即丢）：
 
 ```bash
 -e REGISTRY_CREDENTIALS_DIR=/tmp/registry-manager-data

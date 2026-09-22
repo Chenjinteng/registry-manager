@@ -15,7 +15,15 @@
  * 这是 AES-GCM 的固有限制，不是本实现的缺陷。
  */
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 
 import { RegistryError } from './registry-client.mjs';
@@ -108,15 +116,49 @@ export class EncryptedCollection {
     return this.#filePath;
   }
 
+  /**
+   * 准备目录，并**主动验证可写**。
+   *
+   * 为什么要探测而不是等第一次写入：目录"存在但不可写"时，mkdir 不会执行、
+   * chmod 失败又被忽略，构造会静默成功 —— 页面显示一切正常，直到用户第一次
+   * 新增凭据才失败，而且错误信息跟权限毫无关系，极难排查。
+   * 这里建一个探针文件，把问题在启动时就钉死在数据目录上。
+   */
   #ensureDir() {
     const dir = dirname(this.#filePath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-    }
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 'n/a';
+    const gid = typeof process.getgid === 'function' ? process.getgid() : 'n/a';
+
     try {
-      chmodSync(dir, 0o700);
-    } catch {
-      // 某些平台（macOS 开发机）拿不到权限位，忽略。
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+      }
+      try {
+        chmodSync(dir, 0o700);
+      } catch {
+        // 某些平台（macOS 开发机）拿不到权限位，忽略。
+      }
+      const probe = `${dir}/.write-probe`;
+      writeFileSync(probe, '');
+      rmSync(probe, { force: true });
+    } catch (error) {
+      const code = error?.code ?? 'UNKNOWN';
+      throw new Error(
+        `数据目录不可用：${dir}\n` +
+          `  原因：${code} ${error?.message ?? error}\n` +
+          `  当前进程身份：uid=${uid} gid=${gid}\n` +
+          `  该目录必须【存在】且对上面这个 uid 可写。按部署方式挑一条：\n` +
+          `  · 容器：本镜像已预建 /app/data 并交给 node 用户，报这个错多半是在用旧镜像 ——\n` +
+          `      docker compose up -d --build\n` +
+          `  · 容器：命名卷是早先用旧镜像建的，属主成了 root。卷里本来就没数据，删掉重建：\n` +
+          `      docker compose down\n` +
+          `      docker volume ls | grep registry-manager   # 找到卷名\n` +
+          `      docker volume rm <上面那个卷名>\n` +
+          `      docker compose up -d\n` +
+          `  · bind mount：宿主机目录属主必须是 uid 1000 ——\n` +
+          `      sudo chown -R 1000:1000 ./data\n` +
+          `  · 只想先跑起来（不持久化）：加 -e REGISTRY_CREDENTIALS_DIR=/tmp/registry-manager-data`
+      );
     }
   }
 
