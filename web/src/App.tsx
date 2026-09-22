@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { App as AntdApp, Segmented, Tag } from 'antd';
+import { App as AntdApp, Segmented, Tag, Tooltip } from 'antd';
 import {
   ApiOutlined,
   CloudDownloadOutlined,
@@ -53,6 +53,12 @@ export default function App() {
           <div className="app-brand">
             <DockerOutlined />
             <span>镜像仓库管理</span>
+            {/* 运行中的版本：服务端从 package.json 读，界面上不写死 */}
+            {config?.version ? (
+              <Tooltip title={`当前运行版本 v${config.version}`}>
+                <span className="app-brand-version">v{config.version}</span>
+              </Tooltip>
+            ) : null}
           </div>
           <div className="app-header-meta">
             {config?.usingProxy ? <Tag color="gold">经代理</Tag> : null}

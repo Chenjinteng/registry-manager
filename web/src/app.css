@@ -47,6 +47,21 @@
   white-space: nowrap;
 }
 
+/*
+ * 顶栏里的版本号：弱化处理（小一号、次级文字色、等宽数字），
+ * 既能看到当前跑的是哪个版本，又不跟标题抢注意力。
+ */
+.app-brand-version {
+  padding: 1px 6px;
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-3);
+  background: var(--color-fill-1);
+}
+
 .app-header-meta {
   display: flex;
   min-width: 0;

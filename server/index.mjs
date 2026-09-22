@@ -17,7 +17,7 @@ import { resolve } from 'node:path';
 
 import express from 'express';
 
-import { loadConfig } from './config.mjs';
+import { loadConfig, readAppVersion } from './config.mjs';
 import { Inventory } from './inventory.mjs';
 import { RegistryClient, RegistryError } from './registry-client.mjs';
 import { PullQueue } from './puller.mjs';
@@ -26,6 +26,8 @@ import { ProxyStore, pickProxyPublic, testProxyConnectivity, buildProxyUrl } fro
 import { resolve as resolvePath, join } from 'node:path';
 
 const config = loadConfig();
+/** 运行中的版本号，从 package.json 读（见 config.mjs 的 readAppVersion）。 */
+const appVersion = readAppVersion();
 /**
  * 全局 client：本 registry 的认证来自配置（env 或 registry.config.json），
  * 因此**所有**对本仓库的读写（盘点、删除、拉取时的 mount / blob / manifest PUT）
@@ -121,6 +123,8 @@ app.get('/api/config', (req, res) => {
   ok(res, {
     data: {
       name: config.name,
+      /** 当前运行中的版本，供界面展示；取不到时为空串。 */
+      version: appVersion,
       url: config.url,
       host: client.host,
       usingProxy: Boolean(config.proxy),

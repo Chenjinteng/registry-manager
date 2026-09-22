@@ -11,6 +11,22 @@ import { resolve } from 'node:path';
 const ROOT = resolve(import.meta.dirname, '..');
 const CONFIG_FILE = process.env.REGISTRY_MANAGER_CONFIG || resolve(ROOT, 'registry.config.json');
 
+/**
+ * 当前运行中的版本号。
+ *
+ * **从 package.json 读，不另设一份**：AGENTS.md 规定版本号以 package.json 为准，
+ * 若在代码里再写一遍必然漂移。镜像里也 COPY 了 package.json，容器内同样读得到。
+ * 读不到时返回空串 —— 界面不显示即可，不该因为一个展示字段影响服务启动。
+ */
+export function readAppVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf8'));
+    return typeof pkg?.version === 'string' ? pkg.version : '';
+  } catch {
+    return '';
+  }
+}
+
 const DEFAULTS = {
   name: '镜像仓库',
   url: '',

@@ -36,6 +36,8 @@ export interface Inventory {
 
 export interface AppConfig {
   name: string;
+  /** 当前运行中的版本（服务端从 package.json 读取）；取不到时为空串。 */
+  version: string;
   url: string;
   host: string;
   usingProxy: boolean;
