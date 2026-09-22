@@ -49,16 +49,23 @@ import type {
   PullJobStatus,
   PullPhase,
 } from '../types';
-import { formatBytes, formatDateTime, parseImageReference, shortDigest } from '../utils';
+import {
+  DEST_REPO_PATTERN,
+  DEST_TAG_PATTERN,
+  formatBytes,
+  formatDateTime,
+  parseImageReference,
+  shortDigest,
+  splitRepoTag,
+} from '../utils';
 
 interface Props {
   config: AppConfig | null;
 }
 
 interface FormValues {
-  image: string;     // 用户输入的镜像名（可能含主机前缀）
-  destRepo?: string;
-  destTag?: string;
+  image: string;       // 源镜像名（可能含主机前缀）
+  destImage?: string;  // 本 registry 内的目标镜像名 <repo>[:<tag>]，不含主机
   sourceUrl?: string;  // 高级选项：留空时由 image 自动推断
   sourceProxy?: string; // 高级选项：本任务的来源代理
   sourceAuthMode?: 'none' | 'credential' | 'temp';
@@ -68,21 +75,6 @@ interface FormValues {
 }
 
 const POLL_INTERVAL_MS = 1500;
-
-/**
- * 从 `<repo>[:<tag>]` 字符串里取出 repo 部分。
- *
- * - `library/alpine:3.19` → `library/alpine`
- * - `alpine:3.19`        → `alpine`
- * - `alpine`             → `alpine`
- *
- * 后端会再做合法性校验，这里只是给 destRepo 一个 fallback。
- */
-function defaultDestRepoFromRef(ref: string): string {
-  const colon = ref.lastIndexOf(':');
-  const candidate = colon >= 0 && !ref.slice(colon + 1).includes('/') ? ref.slice(0, colon) : ref;
-  return candidate.replace(/^\/+/, '').trim();
-}
 
 /**
  * 失败 / 取消的任务行默认展开，方便用户直接看到错误原因。
@@ -182,6 +174,42 @@ export default function PullPage({ config }: Props) {
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const liveConfigRef = useRef<AppConfig | null>(config);
   liveConfigRef.current = config;
+  /** 本仓库的 host[:port]；作为固定前缀展示，不可编辑。 */
+  const host = config?.host ?? '';
+  /** 用户是否手动改过「目标镜像名」——改过就不再跟随源镜像，免得把人的输入冲掉。 */
+  const destTouchedRef = useRef(false);
+
+  /**
+   * 源镜像变化时，把目标镜像名同步成"同名"（去掉主机前缀后的 <repo>:<tag>）。
+   *
+   * 只在用户没手动改过目标时才跟随；把目标清空即恢复跟随（否则一旦改过就再也回不到自动）。
+   */
+  const handleValuesChange = (changed: Partial<FormValues>) => {
+    const autoFor = (sourceImage: string | undefined) =>
+      parseImageReference(sourceImage ?? '').sourceRef;
+
+    if ('destImage' in changed) {
+      // 判断这次变化是不是我们自己 setFieldValue 触发的自动填充。
+      if (changed.destImage !== autoFor(form.getFieldValue('image'))) {
+        destTouchedRef.current = true;
+      }
+      if (!changed.destImage) {
+        // 清空 = 恢复跟随源镜像
+        destTouchedRef.current = false;
+        form.setFieldValue('destImage', autoFor(form.getFieldValue('image')));
+      }
+      return;
+    }
+
+    if ('image' in changed) {
+      if (!destTouchedRef.current) {
+        const auto = autoFor(changed.image);
+        if (form.getFieldValue('destImage') !== auto) {
+          form.setFieldValue('destImage', auto);
+        }
+      }
+    }
+  };
 
   // 凭据库可用时拉一次；不可用不请求（listCredentials 仍能调，但服务端会返 CREDENTIAL_KEY_MISSING）。
   const refreshCredentials = useCallback(async () => {
@@ -258,10 +286,16 @@ export default function PullPage({ config }: Props) {
     const sourceUrlEffective = values.sourceUrl?.trim() || parsed.sourceUrl;
     const sourceRefEffective = parsed.sourceRef || image;
 
-    // 目标引用 = 本 registry + 源镜像路径，全部自动补全，不再让用户填。
-    // 目的端主机固定来自服务配置（工具只管理一个 registry），所以这里只可能是
-    // 本仓库内的路径，不存在"push 到另一个 registry"的可能。
-    const destRepo = defaultDestRepoFromRef(sourceRefEffective);
+    // 目标引用 = 本仓库地址（固定）+ 目标镜像名。
+    // 目标镜像名留空则与源镜像同名；用户可以改它来换落地路径
+    // （例如把 library/alpine:3.19 落成 alpine:3.19）。
+    // 主机部分来自服务配置，不可能指到别的 registry。
+    const destRef = values.destImage?.trim() || sourceRefEffective;
+    const { repo: destRepo, tag: destTag } = splitRepoTag(destRef);
+    if (!DEST_REPO_PATTERN.test(destRepo)) {
+      message.error('目标镜像名的仓库路径不合法（只能小写字母 / 数字 / ._- 分段，且不能带主机）');
+      return;
+    }
 
     // 源端认证：credential / temp / none。
     let sourceCredentialId: string | undefined;
@@ -281,7 +315,8 @@ export default function PullPage({ config }: Props) {
       sourceUrl: sourceUrlEffective,
       sourceRef: sourceRefEffective,
       destRepo,
-      // destTag 不再由用户填，留空让服务端沿用源 tag（同一套默认口径）。
+      // 目标镜像名里没写 tag 时留空，让服务端沿用源 tag（同一套默认口径）。
+      destTag: destTag || undefined,
       sourceProxy: values.sourceProxy?.trim() || undefined,
       sourceCredentialId,
       sourceAuthInline,
@@ -468,14 +503,15 @@ export default function PullPage({ config }: Props) {
         <Form<FormValues>
           form={form}
           layout="vertical"
-          initialValues={{ image: 'library/alpine:3.19' }}
+          initialValues={{ image: 'library/alpine:3.19', destImage: 'library/alpine:3.19' }}
           onFinish={handleSubmit}
+          onValuesChange={handleValuesChange}
           disabled={Boolean(config && !config.allowPull)}
         >
           <Form.Item
-            label="镜像名"
+            label="源镜像名"
             name="image"
-            extra="支持任意 docker pull 引用：alpine:3.19、library/alpine:3.19、ghcr.io/owner/img:1.0、192.0.2.10:10001/example/x:1 等。"
+            extra="支持任意 docker pull 引用：alpine:3.19、library/alpine:3.19、ghcr.io/owner/img:1.0、192.0.2.20:10001/library/alpine:3.9 等。"
             rules={[
               { required: true, message: '请填写镜像名' },
               {
@@ -502,6 +538,42 @@ export default function PullPage({ config }: Props) {
             ]}
           >
             <Input placeholder="alpine:3.19" allowClear autoFocus />
+          </Form.Item>
+
+          <Form.Item
+            label="目标镜像名"
+            name="destImage"
+            extra={
+              host
+                ? `本仓库地址 ${host}/ 固定不可改；留空表示与源镜像同名。改这里可以把镜像落到别的路径（例如去掉 library/ 前缀）。`
+                : '本仓库地址固定不可改；留空表示与源镜像同名。'
+            }
+            rules={[
+              {
+                validator: (_, value: string | undefined) => {
+                  if (!value || !value.trim()) {
+                    return Promise.resolve(); // 留空 = 沿用源镜像
+                  }
+                  const { repo, tag } = splitRepoTag(value);
+                  if (!DEST_REPO_PATTERN.test(repo)) {
+                    return Promise.reject(
+                      new Error('仓库路径只能是小写字母 / 数字 / ._- 分段，且不能带主机')
+                    );
+                  }
+                  if (tag && !DEST_TAG_PATTERN.test(tag)) {
+                    return Promise.reject(new Error('tag 只能包含字母数字与 ._-'));
+                  }
+                  return Promise.resolve();
+                },
+              },
+            ]}
+          >
+            {/* 固定前缀用 addonBefore 呈现：视觉上就是"不可编辑的一段"。 */}
+            <Input
+              addonBefore={host ? <span className="mono">{host}/</span> : undefined}
+              placeholder="与源镜像同名"
+              allowClear
+            />
           </Form.Item>
           <Collapse
             ghost

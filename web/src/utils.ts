@@ -107,6 +107,27 @@ export function parseImageReference(raw: string): ParsedImageRef {
 }
 
 /**
+ * 把 `<repo>[:<tag>]` 拆成仓库路径与 tag（tag 可缺省）。
+ *
+ * 只有"最后一个冒号右边不含 `/`"才算 tag，否则整个串都是仓库路径 ——
+ * 这样 `192.0.2.20:10001/foo` 不会被误拆成 repo=`192.0.2.20`、tag=`10001/foo`，
+ * 而是整体作为（非法的）仓库路径被校验拒掉。
+ */
+export function splitRepoTag(ref: string): { repo: string; tag: string } {
+  const value = String(ref ?? '').trim().replace(/^\/+/, '');
+  const colon = value.lastIndexOf(':');
+  if (colon >= 0 && !value.slice(colon + 1).includes('/')) {
+    return { repo: value.slice(0, colon), tag: value.slice(colon + 1) };
+  }
+  return { repo: value, tag: '' };
+}
+
+/** 本 registry 内仓库路径的合法字符（与后端 REPO_RE 一致）。 */
+export const DEST_REPO_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+/** tag 的合法字符（与后端 TAG_RE 一致）。 */
+export const DEST_TAG_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+
+/**
  * 复制文本到剪贴板，返回是否成功。
  *
  * `navigator.clipboard` **只在安全上下文**（HTTPS 或 localhost）下存在。
