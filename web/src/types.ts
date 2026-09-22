@@ -45,9 +45,11 @@ export interface AppConfig {
   /** false 时服务端拒绝一切拉取写入（GET 列表仍可读）。 */
   allowPull: boolean;
   pullQueueSize: number;
-  /** false 时服务端没配密钥，凭据库不可用。 */
+  /** false 时服务端没配密钥或凭据库初始化失败，凭据库不可用。 */
   allowCredentials: boolean;
   credentialsDir: string;
+  /** 凭据库不可用时的具体原因；可用时为 null。 */
+  credentialError: { code: string; message: string } | null;
 }
 
 export interface ApiResult<T> {

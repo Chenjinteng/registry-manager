@@ -300,6 +300,11 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
   ];
 
   if (config && !config.allowCredentials) {
+    // 区分两种失败，否则会把「密钥明明配了」的人引去反复检查 env：
+    //   CREDENTIAL_KEY_MISSING          → 确实没配密钥
+    //   CREDENTIAL_STORE_INIT_FAILED    → 密钥读到了，但目录不可写等
+    const err = config.credentialError;
+    const keyMissing = !err || err.code === 'CREDENTIAL_KEY_MISSING';
     return (
       <div className="page">
         <div className="page-header">
@@ -311,13 +316,30 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
         <Alert
           type="warning"
           showIcon
-          message="服务端未配置 REGISTRY_CREDENTIAL_KEY，凭据库不可用。"
+          message={
+            keyMissing
+              ? '服务端未配置 REGISTRY_CREDENTIAL_KEY，凭据库不可用。'
+              : `凭据库初始化失败（${err.code}）`
+          }
           description={
             <div>
-              <div>镜像拉取仍可工作（匿名源），但不能添加 basic auth 凭据。</div>
-              <div style={{ marginTop: 4 }}>
-                请参考 README 设置 <span className="mono">REGISTRY_CREDENTIAL_KEY</span> 环境变量后重启服务。
-              </div>
+              {keyMissing ? (
+                <div>
+                  请设置环境变量 <span className="mono">REGISTRY_CREDENTIAL_KEY</span>（任意随机 32+ 字符）
+                  后重启服务。镜像拉取仍可工作（匿名源 / 临时输入）。
+                </div>
+              ) : (
+                <>
+                  <div style={{ whiteSpace: 'pre-wrap' }}>{err.message}</div>
+                  <div style={{ marginTop: 8 }}>
+                    当前凭据目录：<span className="mono">{config.credentialsDir}</span>
+                  </div>
+                  <div style={{ marginTop: 8, color: 'var(--color-text-3)' }}>
+                    密钥本身没问题（服务端已读到）。镜像拉取仍可工作（匿名源 / 临时输入），
+                    修好目录后重启即可恢复凭据库。
+                  </div>
+                </>
+              )}
             </div>
           }
         />

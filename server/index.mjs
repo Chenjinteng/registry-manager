@@ -29,24 +29,40 @@ const client = new RegistryClient({ url: config.url, proxy: config.proxy });
 const inventory = new Inventory(client, { ttlSeconds: config.cacheTtlSeconds });
 
 /**
- * 凭据库：必填密钥 REGISTRY_CREDENTIAL_KEY。
- * 这里读 env；如果没设，服务启动时直接报错，避免无密钥凭据库静默运行。
+ * 凭据库初始化。
+ *
+ * 两种失败必须区分开，否则会把用户引到错误的方向：
+ *   - 没设密钥              → 配置缺失，用户该去补 REGISTRY_CREDENTIAL_KEY；
+ *   - 设了密钥但初始化失败  → 目录不可写 / 密钥本身有问题，改密钥没用。
+ * 之前这两种都报“未配置 REGISTRY_CREDENTIAL_KEY”，导致明明配了密钥的人
+ * 反复去检查 env（容器里 env 确实有），却查不出真正原因。
  */
 const credentialKey = String(process.env.REGISTRY_CREDENTIAL_KEY ?? '').trim();
-if (!credentialKey) {
-  // 不直接 throw —— 后面 server.listen 之前再处理，这里只 warning。
-  // 但我们确实要 hard fail：在 listen 之前 throw。
-  // 移到下面 listen 之前做。
-}
 const credentialsFile = resolvePath(join(config.credentialsDir, 'credentials.json'));
-let credentialStore;
-try {
-  credentialStore = credentialKey
-    ? new CredentialStore({ filePath: credentialsFile, masterKey: credentialKey })
-    : null;
-} catch (error) {
-  console.error(`[registry-manager] 凭据库初始化失败：${error.message}`);
-  credentialStore = null;
+
+/** @type {{code: string, message: string} | null} */
+let credentialInitError = null;
+let credentialStore = null;
+
+if (!credentialKey) {
+  credentialInitError = {
+    code: 'CREDENTIAL_KEY_MISSING',
+    message: '未设置环境变量 REGISTRY_CREDENTIAL_KEY，凭据库不可用。',
+  };
+} else {
+  try {
+    credentialStore = new CredentialStore({ filePath: credentialsFile, masterKey: credentialKey });
+  } catch (error) {
+    credentialInitError = {
+      code: 'CREDENTIAL_STORE_INIT_FAILED',
+      message:
+        `凭据库初始化失败：${error.message}。` +
+        `密钥已读到（长度 ${credentialKey.length}），问题出在凭据目录 ` +
+        `${config.credentialsDir}（需要存在且对运行用户可写）。` +
+        `容器里以非 root 的 node 用户运行时，请确保该目录属主是 node（见 Dockerfile / compose 的 volume 配置）。`,
+    };
+    console.error(`[registry-manager] ${credentialInitError.message}`);
+  }
 }
 
 const pullQueue = new PullQueue({
@@ -94,6 +110,9 @@ app.get('/api/config', (req, res) => {
       pullQueueSize: config.pullQueueSize,
       allowCredentials: Boolean(credentialStore),
       credentialsDir: config.credentialsDir,
+      // 凭据库不可用时把原因一并给出，页面才能显示真正的问题，
+      // 而不是一律猜“没配 KEY”。
+      credentialError: credentialInitError,
     },
   });
 });
@@ -451,9 +470,10 @@ app.use((req, res) => {
 const server = app.listen(config.port, () => {
   console.log(`[registry-manager] 已启动: http://127.0.0.1:${config.port}`);
   console.log(`[registry-manager] 目标仓库: ${config.url}${config.proxy ? ` (经代理 ${config.proxy})` : ''}`);
-  if (!credentialStore) {
+  if (!credentialStore && credentialInitError) {
+    // 具体原因已在上面的初始化分支打过 ERROR；这里只补一句影响面。
     console.warn(
-      '[registry-manager] 未配置 REGISTRY_CREDENTIAL_KEY，凭据库不可用。镜像拉取仍可工作（匿名源），但不能添加 basic auth 凭据。'
+      `[registry-manager] 凭据库不可用（${credentialInitError.code}）。镜像拉取仍可工作（匿名源 / 临时输入），但不能使用凭据库。`
     );
   }
   if (!existsSync(distDir)) {

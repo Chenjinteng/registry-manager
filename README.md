@@ -276,3 +276,31 @@ scrypt 派生；密钥与文件**同时丢失 = 凭据永久不可恢复**，运
 
 临时输入模式下，预览 Modal 不会做认证连通测试（密码不在凭据库、服务端拿不到）；
 但任务真正开始时会带上账号密码去连源。
+
+### 凭据库显示"不可用"时怎么排查
+
+页面会区分两种失败，**先看它给的是哪一种**：
+
+| 页面提示 | 含义 | 怎么办 |
+| --- | --- | --- |
+| 未配置 `REGISTRY_CREDENTIAL_KEY` | 环境变量确实没读到 | 补上环境变量后重启 |
+| 凭据库初始化失败（`CREDENTIAL_STORE_INIT_FAILED`） | **密钥已读到**，问题在凭据目录 | 见下 |
+
+第二种几乎都是**目录不可写**。容器里服务以非 root 的 `node` 用户（uid 1000）运行，
+而 `/app` 属主是 root，所以它无法在 `/app` 下自己创建 `/app/data`：
+
+```
+凭据库初始化失败：EPERM: operation not permitted, mkdir '/app/data'
+```
+
+镜像已通过 `RUN mkdir -p /app/data && chown node:node /app/data` 预先建好该目录，
+**用旧镜像会一直报这个错，需要重新构建**。用 bind mount 时宿主机目录属主也必须是
+uid 1000，否则同样失败；`docker-compose.yml` 默认用的是命名卷，首次挂载会沿用镜像里的属主。
+
+想先不改镜像、立刻验证密钥是否正确，可以把它指到一个 node 用户可写的临时路径
+（**不持久化**，容器重建即丢）：
+
+```bash
+-e REGISTRY_CREDENTIALS_DIR=/tmp/registry-manager-data
+```
+

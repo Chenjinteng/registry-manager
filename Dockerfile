@@ -87,7 +87,15 @@ COPY --chown=node:node --from=builder /app/web/dist ./web/dist
 # 这样无论上下文带来的权限位是什么，node 用户都能读。
 RUN chmod -R a+rX /app/server /app/web/dist /app/package.json
 
-# node 镜像自带 uid 1000 的 node 用户；本服务不写磁盘，无需额外授权。
+# 凭据库落盘目录。
+#
+# 必须在镜像里就建好并交给 node 用户：WORKDIR /app 是 root 所有（755），
+# 非 root 的 node 用户无权在其中 mkdir，否则凭据库初始化会以
+# "EPERM/EACCES: mkdir '/app/data'" 失败，表现为页面上凭据库不可用。
+# 先建好目录，挂载空 volume 时 Docker 会沿用这里的属主。
+RUN mkdir -p /app/data && chown node:node /app/data && chmod 700 /app/data
+
+# node 镜像自带 uid 1000 的 node 用户。
 USER node
 
 EXPOSE 8787
