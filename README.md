@@ -9,6 +9,7 @@
 - **镜像列表**：搜索仓库名、按体积或构建时间排序。
 - **镜像详情**：每个 tag 的 digest、架构与操作系统、层数、体积、构建时间，一键复制 `docker pull` 命令。
 - **删除镜像**：按 manifest digest 删除。删除前会列出同一 digest 下的全部 tag，并说明磁盘空间不会立即释放。
+- **镜像拉取**：从外部 registry 拉取镜像落到本仓库，单并发 + FIFO 队列，支持任务级来源代理，优雅取消。
 - **清单概览**：仓库数、tag 数、镜像层合计、清单刷新时间，以及读取失败的 tag 明细。
 - **连接自检**：一键测试 registry 连通性与 API 版本。
 
@@ -61,6 +62,8 @@ docker compose up -d --build
 | `REGISTRY_NAME` | `镜像仓库` | 展示名称 |
 | `REGISTRY_CACHE_TTL_SECONDS` | `60` | 清单缓存时长 |
 | `REGISTRY_ALLOW_DELETE` | `true` | `false` = 只读模式，拒绝所有删除 |
+| `REGISTRY_ALLOW_PULL` | `true` | `false` = 禁止拉取模式，拒绝所有 `/api/pull/*` 写入 |
+| `REGISTRY_PULL_QUEUE_SIZE` | `50` | 内存里保留的最近任务数；超出按创建时间最旧剔除 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
 | `IMAGE` | `registry-manager:0.1.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
@@ -163,6 +166,8 @@ docker push 192.0.2.10:10001/example/registry-manager:0.1.0
 | `proxy` | `REGISTRY_PROXY` | 空 | 访问 registry 需要经过的 HTTP 代理 |
 | `cacheTtlSeconds` | `REGISTRY_CACHE_TTL_SECONDS` | `60` | 清单缓存时长 |
 | `allowDelete` | `REGISTRY_ALLOW_DELETE` | `true` | 设为 `false` 进入只读模式，服务端拒绝一切删除 |
+| `allowPull` | `REGISTRY_ALLOW_PULL` | `true` | 设为 `false` 后服务端拒绝一切 `/api/pull/*` 写入 |
+| `pullQueueSize` | `REGISTRY_PULL_QUEUE_SIZE` | `50` | 内存里保留的最近任务数；超出按创建时间最旧剔除 |
 | `port` | `PORT` | `8787` | 监听端口 |
 
 只有一个 registry：多实例配置属于平台能力，不属于这个工具。
@@ -179,6 +184,11 @@ docker push 192.0.2.10:10001/example/registry-manager:0.1.0
 | POST | `/api/refresh` | 强制重新扫描 |
 | POST | `/api/probe` | 探测连通性与 API 版本 |
 | DELETE | `/api/tags?repository=&tag=` | 删除一个 tag 指向的 manifest |
+| POST | `/api/pull/jobs` | 创建镜像拉取任务 |
+| GET | `/api/pull/jobs` | 列出全部任务（当前 + 排队 + 历史） |
+| GET | `/api/pull/jobs/:id` | 单任务详情（含每个 phase 进度） |
+| POST | `/api/pull/jobs/:id/cancel` | 优雅取消（传输中的 chunk 会写完） |
+| DELETE | `/api/pull/jobs/:id` | 从历史移除（不影响已落库的镜像） |
 
 ## 规模与边界
 
@@ -205,3 +215,23 @@ docker push 192.0.2.10:10001/example/registry-manager:0.1.0
 
 本工具只按 digest 删除，并把上述状态翻译成页面上的明确提示。
 如果不希望任何人从页面删除镜像，设置 `allowDelete: false`。
+
+## 镜像拉取
+
+`镜像拉取` 页面把外部 registry 的镜像落到当前仓库：
+
+- 单并发 + FIFO 队列：同一时刻只跑一个任务，其他任务按提交顺序排队。
+- 每个任务可以单独配 `来源代理`（仅作用于源端，目的端走服务配置的代理），
+  应对"源在公网 / 受限网段、本仓库在内网"这种跨网段场景。
+- 复制优先走 Distribution 的 cross-repo mount（命中即 0 字节传输）；
+  源端没开 mount 时回落为流式 PATCH，**数据始终在两个 registry 之间流式搬运**，不经过本进程内存。
+- 优雅取消：标记 `cancelled` 后立即让源 / 目的 stream 停止传输 —— 正在写的当前 chunk
+  会写完才退出，目的端不会留下半截 manifest。已落库的 blob 不主动清理（沿用
+  "删除不立即释放磁盘" 的约定），交给 `registry garbage-collect` 兜底。
+- 任务只存内存，重启即丢；这是刻意的 —— 与现有清单缓存一致，避免引入持久化依赖。
+
+源暂不支持认证：源返回 `UNAUTHORIZED` 时透传错误提示，不存凭据。如果需要拉私有源，
+先用临时方案把镜像提前推到公网可达的位置或自己写一个反代。
+
+`allowPull: false`（环境变量 `REGISTRY_ALLOW_PULL=false`）可以一键关闭写入，
+GET 列表仍可读，便于运维查看历史任务。
