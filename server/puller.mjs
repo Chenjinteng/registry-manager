@@ -90,11 +90,11 @@ async function selectChildManifest(client, repository, ref, { signal, dispatcher
   try {
     indexJson = JSON.parse(indexBytes.body.toString('utf8'));
   } catch {
-    throw new RegistryError('源 manifest 索引不是合法 JSON', 'SOURCE_MANIFEST_INVALID');
+    throw new RegistryError('源 manifest 索引不是合法 JSON', 'SOURCE_MANIFEST_INVALID').withOrigin('source');
   }
   const childDigest = Array.isArray(indexJson?.manifests) ? indexJson.manifests[0]?.digest : null;
   if (!childDigest) {
-    throw new RegistryError('源 manifest 索引为空', 'SOURCE_MANIFEST_INVALID');
+    throw new RegistryError('源 manifest 索引为空', 'SOURCE_MANIFEST_INVALID').withOrigin('source');
   }
   const childHead = await client.headSourceManifest(repository, childDigest, {
     signal,
@@ -169,7 +169,7 @@ class PullJobRunner {
     try {
       parsedManifest = JSON.parse(manifestBody.toString('utf8'));
     } catch {
-      throw new RegistryError('源 manifest 不是合法 JSON', 'SOURCE_MANIFEST_INVALID');
+      throw new RegistryError('源 manifest 不是合法 JSON', 'SOURCE_MANIFEST_INVALID').withOrigin('source');
     }
     const layers = Array.isArray(parsedManifest.layers) ? parsedManifest.layers : [];
     const configDigest = parsedManifest.config?.digest;
@@ -339,14 +339,16 @@ export class PullQueue {
       normalizedSourceUrl = normalizeBaseUrl(sourceUrl);
     } catch (error) {
       if (error instanceof RegistryError) {
-        throw new RegistryError(error.message, 'INVALID_URL');
+        throw new RegistryError(error.message, 'INVALID_URL').withOrigin('source');
       }
       throw error;
     }
     if (sourceProxy) {
       // 校验代理格式；不能解析只校验字符串前缀（ProxyAgent 在构造时再解析）。
       if (!/^https?:\/\//i.test(sourceProxy.trim())) {
-        throw new RegistryError('sourceProxy 必须以 http:// 或 https:// 开头', 'INVALID_URL');
+        throw new RegistryError('sourceProxy 必须以 http:// 或 https:// 开头', 'INVALID_URL').withOrigin(
+          'source'
+        );
       }
     }
     const jobId = randomUUID();
@@ -364,6 +366,9 @@ export class PullQueue {
       totalBytes: null,
       phases: [],
       createdAt: new Date().toISOString(),
+      errorCode: undefined,
+      errorMessage: undefined,
+      errorOrigin: undefined,
     };
     job.phases.push(makePhase('manifest', jobId));
     job.phases.push(makePhase('config', jobId));
@@ -477,6 +482,7 @@ export class PullQueue {
     } catch (error) {
       const code = error instanceof RegistryError ? error.code : 'UNKNOWN';
       const message = error instanceof RegistryError ? error.message : String(error);
+      const origin = error instanceof RegistryError ? error.origin : undefined;
       // 取消信号比异常优先级更高：
       //   - 显式 CANCELLED 错误 → cancelled；
       //   - signal.aborted 时任何异常（可能是 undici 抛的 ECONNREFUSED 抢先）→ cancelled。
@@ -486,14 +492,16 @@ export class PullQueue {
         job.status = 'cancelled';
         job.errorCode = undefined;
         job.errorMessage = undefined;
+        job.errorOrigin = undefined;
       } else {
         job.status = 'failed';
         job.errorCode = code;
         job.errorMessage = message;
+        job.errorOrigin = origin;
       }
       job.finishedAt = new Date().toISOString();
       console.warn(
-        `[registry-manager] 拉取任务 ${job.id} 终止：${job.status} ${cancelled ? '' : `${code} `}${message}`
+        `[registry-manager] 拉取任务 ${job.id} 终止：${job.status} ${origin ? `${origin} ` : ''}${cancelled ? '' : `${code} `}${message}`
       );
     } finally {
       this.#runningAborts.delete(id);

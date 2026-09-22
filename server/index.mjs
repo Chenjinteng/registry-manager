@@ -41,7 +41,15 @@ function fail(res, error) {
   if (registryError.code === 'INTERNAL_ERROR') {
     console.error('[registry-manager] 未预期的错误', error);
   }
-  res.json({ success: false, code: registryError.code, message: registryError.message });
+  const payload = {
+    success: false,
+    code: registryError.code,
+    message: registryError.message,
+  };
+  if (registryError.origin) {
+    payload.origin = registryError.origin;
+  }
+  res.json(payload);
 }
 
 /** 只暴露连接的目标，不暴露任何可能的凭据（当前实现也没有凭据）。 */
@@ -178,6 +186,25 @@ app.post('/api/pull/jobs', ensurePullAllowed, async (req, res) => {
       destTag: body.destTag ? String(body.destTag) : '',
     });
     ok(res, { data: job, message: '已加入队列' });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
+/**
+ * 源端预检：创建任务前先打一次 GET /v2/，确认源 registry 可达 + 兼容 V2。
+ * 不创建任务，不入队。目的端的预检走 /api/probe（由目的客户端覆盖）。
+ */
+app.post('/api/pull/probe', ensurePullAllowed, async (req, res) => {
+  const body = req.body ?? {};
+  const rawUrl = String(body.sourceUrl ?? '');
+  const proxy = body.sourceProxy ? String(body.sourceProxy) : '';
+  try {
+    const client = new RegistryClient({ url: rawUrl, proxy });
+    const probe = await client.probe({ origin: 'source' });
+    ok(res, {
+      data: { ...probe, sourceUrl: client.baseUrl, usingProxy: Boolean(proxy) },
+    });
   } catch (error) {
     fail(res, error);
   }

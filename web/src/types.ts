@@ -92,6 +92,8 @@ export interface PullJob {
   finalDigest?: string;
   errorCode?: string;
   errorMessage?: string;
+  /** 'source' | 'dest' | undefined。区分错误发生在源还是目的端。 */
+  errorOrigin?: 'source' | 'dest';
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;

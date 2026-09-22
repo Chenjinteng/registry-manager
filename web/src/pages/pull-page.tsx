@@ -4,9 +4,11 @@ import {
   App as AntdApp,
   Button,
   Collapse,
+  Descriptions,
   Empty,
   Form,
   Input,
+  Modal,
   Progress,
   Space,
   Table,
@@ -31,6 +33,7 @@ import {
   createPullJob,
   fetchConfig,
   listPullJobs,
+  probePullSource,
   removePullJob,
 } from '../api';
 import type {
@@ -82,12 +85,18 @@ function defaultExpandedKeys(jobs: PullJob[]): string[] {
 /**
  * 把后端稳定的 code 翻译成一句"运维能直接照做"的提示。
  * 摘要放在表格行内，全文在展开区；这里只保留一句最重要的根因。
+ *
+ * 用 `errorOrigin` 区分源 / 目的：CONNECTION_FAILED 同名但可能是源不可达或目的写不进去。
  */
 function failureHint(job: PullJob): string {
   const code = job.errorCode ?? '';
+  const origin = job.errorOrigin;
+  const side = origin === 'source' ? '源' : origin === 'dest' ? '目的' : '';
+
   switch (code) {
-    case 'SOURCE_UNREACHABLE':
     case 'CONNECTION_FAILED':
+      return side ? `${side} registry 连不上，请检查地址 / 代理` : '镜像仓库连不上';
+    case 'SOURCE_UNREACHABLE':
       return '源 registry 连不上，请检查地址 / 代理';
     case 'SOURCE_UNAUTHORIZED':
       return '源 registry 要求认证，本工具不支持';
@@ -100,6 +109,7 @@ function failureHint(job: PullJob): string {
     case 'SOURCE_MANIFEST_INVALID':
       return '源 manifest 解析失败';
     case 'INVALID_URL':
+      return '源地址不合法';
     case 'INVALID_REQUEST':
       return '输入参数不合法';
     case 'DEST_FORBIDDEN':
@@ -139,6 +149,8 @@ export default function PullPage({ config }: Props) {
   const [jobs, setJobs] = useState<PullJob[]>([]);
   const [error, setError] = useState<ApiResult<unknown> | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  /** 创建前的预览：表单点击"加入队列"后打开 Modal 确认 + 源预检。 */
+  const [pendingInput, setPendingInput] = useState<PullJobInput | null>(null);
   const liveConfigRef = useRef<AppConfig | null>(config);
   liveConfigRef.current = config;
 
@@ -202,29 +214,40 @@ export default function PullPage({ config }: Props) {
     // destRepo：留空沿用源 repo；用户在表里可显式改成别的。
     const destRepo = values.destRepo?.trim() || defaultDestRepoFromRef(sourceRefEffective);
 
+    // 打开预览 Modal，让用户看清将要做什么 + 源端预检，再真正入队。
+    setPendingInput({
+      sourceUrl: sourceUrlEffective,
+      sourceRef: sourceRefEffective,
+      destRepo,
+      destTag: values.destTag?.trim() || undefined,
+      sourceProxy: values.sourceProxy?.trim() || undefined,
+    });
+  };
+
+  /** Modal 里点确认才真正创建。 */
+  const handleConfirmCreate = async () => {
+    if (!pendingInput) return;
     setSubmitting(true);
     try {
-      const input: PullJobInput = {
-        sourceUrl: sourceUrlEffective,
-        sourceRef: sourceRefEffective,
-        destRepo,
-        destTag: values.destTag?.trim() || undefined,
-        sourceProxy: values.sourceProxy?.trim() || undefined,
-      };
-      const result = await createPullJob(input);
+      const result = await createPullJob(pendingInput);
       if (!result.success) {
         setError(result);
         message.error(result.message || '创建任务失败');
         return;
       }
       message.success(
-        `已加入队列：从 ${input.sourceUrl} 拉取 ${input.sourceRef} → ${input.destRepo}`
+        `已加入队列：从 ${pendingInput.sourceUrl} 拉取 ${pendingInput.sourceRef} → ${pendingInput.destRepo}`
       );
+      setPendingInput(null);
       form.resetFields();
       await refresh();
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleCancelPreview = () => {
+    setPendingInput(null);
   };
 
   const handleCancel = async (job: PullJob) => {
@@ -561,7 +584,143 @@ export default function PullPage({ config }: Props) {
           }}
         />
       </div>
+
+      <PullPreviewModal
+        input={pendingInput}
+        onConfirm={handleConfirmCreate}
+        onCancel={handleCancelPreview}
+        submitting={submitting}
+      />
     </div>
+  );
+}
+
+/**
+ * 创建任务前的预览 Modal：
+ *   - 列出解析后的全部字段（源 / 目的 / 代理）
+ *   - 真实打一次源端 GET /v2/，把"能不能连"立刻告诉用户
+ *   - 源不通时不允许"确认入队"，避免浪费一次任务
+ *   - 目的端的可达性由 /api/probe 单独验证（沿用既有 endpoint）
+ */
+function PullPreviewModal({
+  input,
+  onConfirm,
+  onCancel,
+  submitting,
+}: {
+  input: PullJobInput | null;
+  onConfirm: () => void;
+  onCancel: () => void;
+  submitting: boolean;
+}) {
+  const [probeResult, setProbeResult] = useState<
+    | { state: 'idle' }
+    | { state: 'loading' }
+    | { state: 'ok'; apiVersion: string; host: string }
+    | { state: 'failed'; message: string; origin?: 'source' | 'dest' }
+  >({ state: 'idle' });
+
+  // 打开时主动跑一次源端预检。
+  useEffect(() => {
+    if (!input) {
+      setProbeResult({ state: 'idle' });
+      return;
+    }
+    let cancelled = false;
+    setProbeResult({ state: 'loading' });
+    probePullSource({ sourceUrl: input.sourceUrl, sourceProxy: input.sourceProxy })
+      .then((result) => {
+        if (cancelled) return;
+        if (result.success && result.data) {
+          setProbeResult({
+            state: 'ok',
+            apiVersion: result.data.apiVersion,
+            host: result.data.host,
+          });
+        } else {
+          setProbeResult({
+            state: 'failed',
+            message: result.message,
+            origin: (result as { origin?: 'source' | 'dest' }).origin,
+          });
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setProbeResult({ state: 'failed', message: String(error?.message ?? error) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [input]);
+
+  return (
+    <Modal
+      open={Boolean(input)}
+      title="即将创建拉取任务"
+      okText="确认入队"
+      cancelText="再改改"
+      okButtonProps={{ disabled: probeResult.state === 'failed' || probeResult.state === 'loading' || submitting, loading: submitting }}
+      onCancel={onCancel}
+      onOk={onConfirm}
+      destroyOnClose
+    >
+      {input ? (
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Descriptions size="small" column={1} bordered>
+            <Descriptions.Item label="源 registry">
+              <span className="mono">{input.sourceUrl}</span>
+              {input.sourceProxy ? <Tag color="gold" style={{ marginLeft: 8 }}>来源代理</Tag> : null}
+            </Descriptions.Item>
+            <Descriptions.Item label="源镜像">
+              <span className="mono">{input.sourceRef}</span>
+            </Descriptions.Item>
+            <Descriptions.Item label="目的仓库">
+              <span className="mono">{input.destRepo}:{input.destTag}</span>
+            </Descriptions.Item>
+            <Descriptions.Item label="目的端">
+              <span style={{ color: 'var(--color-text-3)' }}>
+                写到当前管理的 registry（不允许修改）；连通性请到「设置」页测试。
+              </span>
+            </Descriptions.Item>
+          </Descriptions>
+
+          <Alert
+            type={
+              probeResult.state === 'ok'
+                ? 'success'
+                : probeResult.state === 'failed'
+                ? 'error'
+                : 'info'
+            }
+            showIcon
+            message={
+              probeResult.state === 'idle'
+                ? '准备预检'
+                : probeResult.state === 'loading'
+                ? '正在测试源 registry 连通性…'
+                : probeResult.state === 'ok'
+                ? `源可达 · API ${probeResult.apiVersion}（${probeResult.host}）`
+                : `源不可达${probeResult.origin === 'source' ? '' : ''}`
+            }
+            description={
+              probeResult.state === 'failed' ? (
+                <span>
+                  <strong style={{ display: 'block', marginBottom: 4 }}>{probeResult.message}</strong>
+                  <span style={{ color: 'var(--color-text-3)' }}>
+                    请确认源地址是否正确；若在内网/受限网段，请在「高级选项」里填一个来源代理。
+                  </span>
+                </span>
+              ) : probeResult.state === 'ok' ? (
+                <span style={{ color: 'var(--color-text-3)' }}>
+                  源 registry 已就绪。目的端的写入权限由本仓库决定，不在此处预检。
+                </span>
+              ) : null
+            }
+          />
+        </Space>
+      ) : null}
+    </Modal>
   );
 }
 
@@ -643,7 +802,12 @@ function JobPhases({ job }: { job: PullJob }) {
         >
           <Tag color="error">失败</Tag>
           <span style={{ fontSize: 12 }}>
-            {failedPhaseLabel(job)}
+            {job.errorOrigin === 'source'
+              ? '源端'
+              : job.errorOrigin === 'dest'
+              ? '目的端'
+              : ''}
+            {failedPhaseLabel(job) ? ` · ${failedPhaseLabel(job)}` : ''}
             {job.errorCode ? ` · ${job.errorCode}` : ''}：{job.errorMessage}
           </span>
         </div>

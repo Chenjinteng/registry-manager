@@ -62,3 +62,9 @@ export const cancelPullJob = (id: string) =>
 
 export const removePullJob = (id: string) =>
   request<{ id: string }>(`/api/pull/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
+export const probePullSource = (input: { sourceUrl: string; sourceProxy?: string }) =>
+  request<{ apiVersion: string; host: string; sourceUrl: string; usingProxy: boolean }>(
+    '/api/pull/probe',
+    { method: 'POST', body: JSON.stringify(input) }
+  );

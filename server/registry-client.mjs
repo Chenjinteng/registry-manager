@@ -31,6 +31,20 @@ export class RegistryError extends Error {
     this.name = 'RegistryError';
     this.code = code;
     this.params = params;
+    /**
+     * 哪一侧出错了：
+     *  - undefined：与方向无关的内部错误（参数校验、协议解析等）
+     *  - 'source'：源 registry（这次拉取要去读的地方）
+     *  - 'dest'  ：本仓库（这次拉取要写入的地方）
+     *
+     * 前端用这个字段把"源/目的"贴在错误提示里，避免 CONNECTION_FAILED 一刀切。
+     */
+    this.origin = undefined;
+  }
+
+  withOrigin(origin) {
+    this.origin = origin;
+    return this;
   }
 }
 
@@ -76,7 +90,7 @@ export class RegistryClient {
    * - `dispatcher` 不传时用实例默认（通常是访问本仓库的代理）。
    *   跨源场景（拉外部镜像）调用方可以传自己的 dispatcher 走另一个代理。
    */
-  async #request(method, path, { accept = '', timeoutMs, redirect = 'follow', signal, dispatcher } = {}) {
+  async #request(method, path, { accept = '', timeoutMs, redirect = 'follow', signal, dispatcher, origin } = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs ?? this.timeoutMs);
     // 串联外部 signal：调用方取消 → 我们的 controller 也 abort。
@@ -101,8 +115,17 @@ export class RegistryClient {
         dispatcher: dispatcher ?? this.dispatcher,
       });
     } catch (error) {
-      const reason = error?.name === 'AbortError' ? '请求被取消' : '无法连接到镜像仓库';
-      throw new RegistryError(reason, 'CONNECTION_FAILED', { detail: String(error?.message ?? error) });
+      // undici 在不可达 IP 上抛 ECONNREFUSED，错误名也是 AbortError；
+      // 通过 message / code 进一步区分"对端拒连"和"我们自己主动取消"。
+      const name = error?.name ?? '';
+      const code = error?.code ?? '';
+      const isCanceled = name === 'AbortError' && code === 'UND_ERR_ABORTED';
+      const reason = isCanceled
+        ? '请求被取消'
+        : name === 'AbortError' || code === 'UND_ERR_SOCKET'
+        ? '无法连接到镜像仓库（连接被拒 / 超时）'
+        : '无法连接到镜像仓库';
+      throw new RegistryError(reason, 'CONNECTION_FAILED', { detail: String(error?.message ?? error) }).withOrigin(origin);
     } finally {
       clearTimeout(timer);
       if (signal) {
@@ -176,19 +199,21 @@ export class RegistryClient {
    * 不能用 OPTIONS 的 Allow 头判断删除能力：Distribution 对已关闭删除的实例
    * 同样宣告 `Allow: DELETE`，只有真正 DELETE 才会返回 405。
    */
-  async probe() {
-    const response = await this.#request('GET', '/v2/', { timeoutMs: PROBE_TIMEOUT_MS });
+  async probe({ origin } = {}) {
+    const response = await this.#request('GET', '/v2/', { timeoutMs: PROBE_TIMEOUT_MS, origin });
     const apiVersion = (response.headers.get('docker-distribution-api-version') ?? '').trim();
     if (response.status === 401) {
-      throw new RegistryError('镜像仓库要求认证，本工具未配置凭据', 'UNAUTHORIZED');
+      throw new RegistryError('镜像仓库要求认证，本工具未配置凭据', 'UNAUTHORIZED').withOrigin(origin);
     }
     if (!response.ok) {
       throw new RegistryError(`仓库探测失败: HTTP ${response.status}`, 'HTTP_FAILED', {
         status: response.status,
-      });
+      }).withOrigin(origin);
     }
     if (!apiVersion) {
-      throw new RegistryError('目标不是符合 Docker Registry HTTP API V2 的镜像仓库', 'NOT_A_REGISTRY');
+      throw new RegistryError('目标不是符合 Docker Registry HTTP API V2 的镜像仓库', 'NOT_A_REGISTRY').withOrigin(
+        origin
+      );
     }
     return { apiVersion, host: this.host };
   }
@@ -278,23 +303,24 @@ export class RegistryClient {
       redirect: 'follow',
       signal,
       dispatcher,
+      origin: 'source',
     });
     if (response.status === 404) {
       throw new RegistryError(
         `${repository}:${reference} 的 manifest 不存在`,
         'SOURCE_MANIFEST_NOT_FOUND',
         { reference: `${repository}:${reference}` }
-      );
+      ).withOrigin('source');
     }
     if (response.status === 401 || response.status === 403) {
       throw new RegistryError('源 registry 要求认证，本工具未配置凭据', 'SOURCE_UNAUTHORIZED', {
         status: response.status,
-      });
+      }).withOrigin('source');
     }
     if (!response.ok) {
       throw new RegistryError(`读取源 manifest 失败: HTTP ${response.status}`, 'SOURCE_HTTP_FAILED', {
         status: response.status,
-      });
+      }).withOrigin('source');
     }
     return {
       mediaType: (response.headers.get('content-type') ?? '').split(';')[0].trim(),
@@ -310,6 +336,7 @@ export class RegistryClient {
       redirect: 'follow',
       signal,
       dispatcher,
+      origin: 'source',
     });
     if (response.status === 404) {
       throw new RegistryError(
@@ -321,12 +348,12 @@ export class RegistryClient {
     if (response.status === 401 || response.status === 403) {
       throw new RegistryError('源 registry 要求认证，本工具未配置凭据', 'SOURCE_UNAUTHORIZED', {
         status: response.status,
-      });
+      }).withOrigin('source');
     }
     if (!response.ok) {
       throw new RegistryError(`读取源 manifest 失败: HTTP ${response.status}`, 'SOURCE_HTTP_FAILED', {
         status: response.status,
-      });
+      }).withOrigin('source');
     }
     const arrayBuffer = await response.arrayBuffer();
     return {
@@ -347,20 +374,23 @@ export class RegistryClient {
       redirect: 'follow',
       signal,
       dispatcher,
+      origin: 'source',
     });
     if (response.status === 404) {
-      throw new RegistryError(`源 blob ${digest} 不存在`, 'SOURCE_BLOB_NOT_FOUND', { digest });
+      throw new RegistryError(`源 blob ${digest} 不存在`, 'SOURCE_BLOB_NOT_FOUND', { digest }).withOrigin(
+        'source'
+      );
     }
     if (response.status === 401 || response.status === 403) {
       throw new RegistryError('源 registry 要求认证，本工具未配置凭据', 'SOURCE_UNAUTHORIZED', {
         status: response.status,
-      });
+      }).withOrigin('source');
     }
     if (!response.ok) {
       throw new RegistryError(`读取源 blob 失败: HTTP ${response.status}`, 'SOURCE_HTTP_FAILED', {
         status: response.status,
         digest,
-      });
+      }).withOrigin('source');
     }
     return {
       response,
@@ -379,7 +409,7 @@ export class RegistryClient {
     const response = await this.#request(
       'POST',
       `/v2/${destRepo}/blobs/uploads/?${query.toString()}`,
-      { redirect: 'manual', signal }
+      { redirect: 'manual', signal, origin: 'dest' }
     );
     if (response.status === 201) {
       return { mounted: true };
@@ -396,13 +426,13 @@ export class RegistryClient {
         `目的 registry 拒绝写入 ${destRepo}（HTTP ${response.status}）`,
         'DEST_FORBIDDEN',
         { status: response.status }
-      );
+      ).withOrigin('dest');
     }
     throw new RegistryError(
       `目的 mount 失败: HTTP ${response.status}`,
       'BLOB_MOUNT_FAILED',
       { status: response.status, digest }
-    );
+    ).withOrigin('dest');
   }
 
   /** 目的端 POST /v2/<repo>/blobs/uploads/：拿 upload session 的 Location。 */
@@ -410,22 +440,25 @@ export class RegistryClient {
     const response = await this.#request('POST', `/v2/${destRepo}/blobs/uploads/`, {
       redirect: 'manual',
       signal,
+      origin: 'dest',
     });
     if (response.status === 401 || response.status === 403) {
       throw new RegistryError('目的 registry 拒绝写入', 'DEST_FORBIDDEN', {
         status: response.status,
-      });
+      }).withOrigin('dest');
     }
     if (response.status !== 202) {
       throw new RegistryError(
         `目的上传初始化失败: HTTP ${response.status}`,
         'BLOB_UPLOAD_INIT_FAILED',
         { status: response.status }
-      );
+      ).withOrigin('dest');
     }
     const location = response.headers.get('location') || response.headers.get('Location');
     if (!location) {
-      throw new RegistryError('目的 registry 未返回 Location 头', 'BLOB_UPLOAD_INIT_FAILED');
+      throw new RegistryError('目的 registry 未返回 Location 头', 'BLOB_UPLOAD_INIT_FAILED').withOrigin(
+        'dest'
+      );
     }
     return { location };
   }
@@ -525,7 +558,7 @@ export class RegistryClient {
           `目的 PATCH 失败: HTTP ${response.status}`,
           'BLOB_UPLOAD_FAILED',
           { status: response.status, detail: distribution.message }
-        );
+        ).withOrigin('dest');
       }
       return { bytes: totalWritten, location };
     } catch (error) {
@@ -536,7 +569,9 @@ export class RegistryClient {
         throw new RegistryError('拉取已取消', 'CANCELLED');
       }
       const reason = error?.name === 'AbortError' ? '目的 PATCH 超时或中断' : '目的 PATCH 失败';
-      throw new RegistryError(reason, 'BLOB_UPLOAD_FAILED', { detail: String(error?.message ?? error) });
+      throw new RegistryError(reason, 'BLOB_UPLOAD_FAILED', {
+        detail: String(error?.message ?? error),
+      }).withOrigin('dest');
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
       if (signal) signal.removeEventListener('abort', abortPipeline);
@@ -552,6 +587,7 @@ export class RegistryClient {
     const response = await this.#request('PUT', finalUrl.replace(this.baseUrl, ''), {
       signal,
       redirect: 'manual',
+      origin: 'dest',
     });
     if (response.status === 201) {
       return { finalDigest: (response.headers.get('docker-content-digest') ?? '').trim() || digest };
@@ -560,13 +596,13 @@ export class RegistryClient {
     if (response.status === 400 && distribution.code === 'DIGEST_INVALID') {
       throw new RegistryError('目的上传 digest 校验失败', 'BLOB_UPLOAD_FAILED', {
         detail: distribution.message,
-      });
+      }).withOrigin('dest');
     }
     throw new RegistryError(
       `目的 PUT 失败: HTTP ${response.status}`,
       'BLOB_UPLOAD_FAILED',
       { status: response.status, detail: distribution.message }
-    );
+    ).withOrigin('dest');
   }
 
   /** 目的端 PUT /v2/<repo>/manifests/<tag>：落库 manifest。 */
@@ -597,13 +633,13 @@ export class RegistryClient {
       if (response.status === 401 || response.status === 403) {
         throw new RegistryError('目的 registry 拒绝写入 manifest', 'DEST_FORBIDDEN', {
           status: response.status,
-        });
+        }).withOrigin('dest');
       }
       throw new RegistryError(
         `目的 manifest PUT 失败: HTTP ${response.status}`,
         'MANIFEST_PUT_FAILED',
         { status: response.status, detail: distribution.message }
-      );
+      ).withOrigin('dest');
     } catch (error) {
       if (error instanceof RegistryError) {
         throw error;
@@ -613,7 +649,7 @@ export class RegistryClient {
       }
       throw new RegistryError('目的 manifest PUT 失败', 'MANIFEST_PUT_FAILED', {
         detail: String(error?.message ?? error),
-      });
+      }).withOrigin('dest');
     } finally {
       if (signal) signal.removeEventListener('abort', onAbort);
     }
