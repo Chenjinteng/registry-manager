@@ -61,6 +61,8 @@ export interface ParsedImageRef {
 
 const KNOWN_HOSTS = new Set([
   'docker.io',
+  'index.docker.io',
+  'registry-1.docker.io',
   'ghcr.io',
   'gcr.io',
   'quay.io',
@@ -68,6 +70,15 @@ const KNOWN_HOSTS = new Set([
   'mcr.microsoft.com',
   'registry.access.redhat.com',
 ]);
+
+/** Docker Hub 的各个别名，以及它们真正的 API 主机。 */
+const DOCKER_HUB_HOSTS = new Set([
+  'docker.io',
+  'index.docker.io',
+  'registry-1.docker.io',
+  'registry.docker.io',
+]);
+const DOCKER_HUB_API = 'https://registry-1.docker.io';
 
 function isHostSegment(segment: string): boolean {
   if (!segment) return false;
@@ -87,23 +98,60 @@ function inferProtocol(host: string): 'http' | 'https' {
   return 'http';
 }
 
+/**
+ * Docker Hub 官方镜像（alpine / nginx 这类单段名字）在 Hub 上实际位于
+ * `library/` 命名空间下。`docker pull nginx` 能用是因为 CLI 自动补了前缀，
+ * 直接请求 `/v2/nginx/...` 是拿不到的。
+ *
+ * 这里做同样的补全，只对 Docker Hub 生效 —— 其它 registry（ghcr、内网仓库）
+ * 没有这个约定。
+ */
+function applyDockerHubLibraryPrefix(repo: string): string {
+  const name = String(repo ?? '').replace(/^\/+/, '');
+  if (!name) return name;
+  // 只要没有 `/`，就是官方镜像的单段名。
+  return name.includes('/') ? name : `library/${name}`;
+}
+
+/**
+ * 判断一个 registry URL 是不是 Docker Hub（含各种别名）。
+ * 用于决定是否补 `library/` 前缀。
+ */
+export function isDockerHubUrl(url: string): boolean {
+  try {
+    return DOCKER_HUB_HOSTS.has(new URL(String(url)).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** 把任意 Docker Hub 别名归一到真正的 API 主机。 */
+function normalizeDockerHubHost(host: string): string {
+  return DOCKER_HUB_HOSTS.has(host) ? DOCKER_HUB_API : `${inferProtocol(host)}://${host}`;
+}
+
 export function parseImageReference(raw: string): ParsedImageRef {
   const value = String(raw ?? '').trim();
   if (!value) {
-    return { sourceUrl: 'https://registry-1.docker.io', sourceRef: '' };
+    return { sourceUrl: DOCKER_HUB_API, sourceRef: '' };
   }
-  // docker 引用的合法字符（不含 '@',不在用户原文里用作前缀）
   const firstSlash = value.indexOf('/');
   if (firstSlash > 0) {
     const head = value.slice(0, firstSlash);
     const tail = value.slice(firstSlash + 1);
     if (isHostSegment(head)) {
-      const protocol = inferProtocol(head);
-      return { sourceUrl: `${protocol}://${head}`, sourceRef: tail };
+      if (DOCKER_HUB_HOSTS.has(head)) {
+        // 显式写了 docker.io 也要归一 + 补 library/
+        return {
+          sourceUrl: DOCKER_HUB_API,
+          sourceRef: applyDockerHubLibraryPrefix(tail),
+        };
+      }
+      return { sourceUrl: normalizeDockerHubHost(head), sourceRef: tail };
     }
   }
-  // 没有主机前缀 → docker.io
-  return { sourceUrl: 'https://registry-1.docker.io', sourceRef: value };
+  // 没有主机前缀 → Docker Hub，补 library/
+  return { sourceUrl: DOCKER_HUB_API, sourceRef: applyDockerHubLibraryPrefix(value) };
 }
 
 /**

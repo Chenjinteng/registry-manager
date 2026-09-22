@@ -28,6 +28,42 @@ const INDEX_MEDIA_TYPES = new Set([
 const REPO_RE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
 const TAG_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 
+/**
+ * Docker Hub 的各个别名（`docker pull nginx` 实际打的是 registry-1.docker.io）。
+ */
+const DOCKER_HUB_HOSTS = new Set([
+  'docker.io',
+  'index.docker.io',
+  'registry-1.docker.io',
+  'registry.docker.io',
+]);
+
+function isDockerHubUrl(url) {
+  try {
+    return DOCKER_HUB_HOSTS.has(new URL(String(url)).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Docker Hub 的官方镜像（alpine / nginx 这类单段名字）实际位于 `library/` 下。
+ * `docker pull nginx` 能用是因为 CLI 自动补了前缀；直接请求 `/v2/nginx/...` 拿不到，
+ * 而 Docker Hub 对不存在的仓库也回 401，于是表现为"要求认证"——很容易误判。
+ *
+ * 只对 Docker Hub 生效，其它 registry 没有这个约定。
+ */
+function applyDockerHubLibraryPrefix(ref) {
+  const value = String(ref ?? '').replace(/^\/+/, '');
+  const colon = value.lastIndexOf(':');
+  const repo = colon >= 0 && !value.slice(colon + 1).includes('/') ? value.slice(0, colon) : value;
+  const tag = colon >= 0 && !value.slice(colon + 1).includes('/') ? value.slice(colon + 1) : '';
+  if (!repo || repo.includes('/')) {
+    return value;
+  }
+  return tag ? `library/${repo}:${tag}` : `library/${repo}`;
+}
+
 /** 把 sourceRef 拆成 <repo>:<tag>。tag 不允许含 '/';镜像引用形如 library/alpine:3.19。 */
 function splitSourceRef(ref) {
   const value = String(ref ?? '').trim();
@@ -425,6 +461,18 @@ export class PullQueue {
         );
       }
     }
+    // Docker Hub 的别名统一到真正的 API 主机，并给官方镜像补上 library/
+    // （curl / API 直接调用也要和页面行为一致）。
+    const effectiveSourceUrl = isDockerHubUrl(normalizedSourceUrl)
+      ? 'https://registry-1.docker.io'
+      : normalizedSourceUrl;
+    const effectiveSourceRef = isDockerHubUrl(normalizedSourceUrl)
+      ? applyDockerHubLibraryPrefix(sourceRef)
+      : sourceRef;
+    const effectiveValidated = effectiveSourceRef === sourceRef
+      ? validated
+      : validateInputs({ sourceRef: effectiveSourceRef, destRepo, destTag });
+
     // 校验源凭据可用性（存在 + registryUrl 严格匹配）。
     // 放在入队时做，而不是等到 runner 执行：否则用户点了「确认入队」才失败，白点一次。
     if (sourceCredentialId && !this.credentialStore) {
@@ -438,7 +486,7 @@ export class PullQueue {
       if (!c) {
         throw new RegistryError(`源凭据不存在：${sourceCredentialId}`, 'JOB_NOT_FOUND').withOrigin('source');
       }
-      assertCredentialUsable(c, normalizedSourceUrl);
+      assertCredentialUsable(c, effectiveSourceUrl);
     }
     // 代理库的 id 也要在入队时就校验：否则等到执行才发现代理被删了。
     if (sourceProxyId && !this.proxyStore) {
@@ -455,12 +503,12 @@ export class PullQueue {
     const jobId = randomUUID();
     const job = {
       id: jobId,
-      sourceUrl: normalizedSourceUrl,
-      sourceRef,
+      sourceUrl: effectiveSourceUrl,
+      sourceRef: effectiveSourceRef,
       sourceProxy: sourceProxy || '',
       sourceProxyId: sourceProxyId || undefined,
-      sourceRepo: validated.sourceRepo,
-      sourceTag: validated.sourceTag,
+      sourceRepo: effectiveValidated.sourceRepo,
+      sourceTag: effectiveValidated.sourceTag,
       destRepo: validated.destRepo,
       destTag: validated.destTag,
       sourceCredentialId: sourceCredentialId || undefined,

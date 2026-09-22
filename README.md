@@ -44,10 +44,10 @@ pnpm start     # 单进程同时提供页面与 /api，默认 http://127.0.0.1:8
 
 ```bash
 pnpm type-check   # 前端类型
-pnpm verify       # 非破坏性回归：认证头 + 双端认证的完整拉取
+pnpm verify       # 非破坏性回归：basic 认证头 / Bearer 令牌流程 / 双端认证的完整拉取
 ```
 
-`pnpm verify` 会起两个进程内的 mock registry（要求 Basic auth），用真实的
+`pnpm verify` 会起几个进程内的 mock registry（Basic auth、Bearer 令牌各一套），用真实的
 `PullQueue` 跑一次完整拉取，断言认证头真的发到了线路上、流式 PATCH 真的到达目的端、
 blob 逐字节一致、manifest 原样落库。**不接触任何真实仓库**，可以随时跑。
 
@@ -331,6 +331,34 @@ scrypt 派生；密钥与文件**同时丢失 = 凭据永久不可恢复**，运
 
 临时输入模式下，预览 Modal 不会做认证连通测试（密码不在凭据库、服务端拿不到）；
 但任务真正开始时会带上账号密码去连源。
+
+### 公共源为什么"不用配凭据"也能拉
+
+Docker Hub / ghcr / quay 这类 registry 用的是 **Bearer 令牌认证**，不是 basic auth：
+
+1. 匿名请求先吃 `401` + `WWW-Authenticate: Bearer realm="https://auth.docker.io/token",service=...`；
+2. 客户端拿 realm 去换一个（匿名的，或带你账号的）token；
+3. 用 `Authorization: Bearer <token>` 重试。
+
+`docker pull nginx` 自动做这三步，所以"不用登录"也能拉公开镜像。本工具现在也走同一套流程，
+**匿名即可拉公共镜像**；token 按 scope 缓存复用，不会每个请求都去换一次。
+私有镜像则在令牌请求里带上你在「凭据管理」里配的账号 —— 所以凭据仍然有用，只是
+它的作用是"换一个权限更高的 token"，而不是直接当 basic auth 用。
+
+另外 `docker pull nginx` 能用的第二个原因是 CLI 自动补了 `library/` 前缀：
+官方镜像在 Hub 上位于 `library/` 下，直接请求 `/v2/nginx/...` 是拿不到的，
+而 Hub 对不存在的仓库也回 `401`，很容易被误读成"要认证"。本工具现在也做同样的补全：
+
+```
+输入 nginx:latest
+  → 源 registry  https://registry-1.docker.io
+  → 源镜像       library/nginx:latest      （自动补 library/）
+  → 目标引用     192.0.2.10:10001/library/nginx:latest
+```
+
+`docker.io` / `index.docker.io` 这些别名也会被归一到真正的 API 主机
+`registry-1.docker.io`（`docker.io` 本身是网站，不是 registry API）。
+补全只对 Docker Hub 生效，其它 registry 没有这个约定。
 
 ### 代理管理（外部源代理）
 

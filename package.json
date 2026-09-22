@@ -13,8 +13,9 @@
     "build": "vite build",
     "start": "node server/index.mjs",
     "type-check": "tsc --noEmit",
-    "verify": "node scripts/verify-auth.mjs && node scripts/verify-pull.mjs",
+    "verify": "node scripts/verify-auth.mjs && node scripts/verify-token-auth.mjs && node scripts/verify-pull.mjs",
     "verify:auth": "node scripts/verify-auth.mjs",
+    "verify:token": "node scripts/verify-token-auth.mjs",
     "verify:pull": "node scripts/verify-pull.mjs"
   },
   "dependencies": {

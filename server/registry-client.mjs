@@ -76,8 +76,15 @@ async function readDistributionError(response) {
  * 401 是"需要认证"——本工具支持 basic auth，所以要直接告诉用户去哪儿配，
  * 而不是像过去那样说"本工具未配置凭据"（那是凭据功能上线前的旧文案，会误导）。
  */
-function sourceAuthMessage(status) {
+function sourceAuthMessage(status, { bearerRealm } = {}) {
   if (status === 401) {
+    if (bearerRealm) {
+      return (
+        `源 registry 要求认证（HTTP 401，Bearer 令牌服务 ${bearerRealm}）。` +
+        '本工具会自动申请匿名令牌；仍失败说明该镜像不是公开的，' +
+        '请在任务的「高级选项 → 源认证」中选择一条凭据（账号 / 令牌）。'
+      );
+    }
     return (
       '源 registry 要求认证（HTTP 401）。请在任务的「高级选项 → 源认证」中选择一条凭据，' +
       '或临时输入账号 / 密码后重试。'
@@ -97,6 +104,42 @@ function destAuthMessage(status, destRepo) {
   return `本 registry 拒绝写入 ${destRepo}（HTTP 403）：该账号可能没有推送权限。`;
 }
 
+/**
+ * 解析 `WWW-Authenticate: Bearer realm="...",service="...",scope="..."`。
+ *
+ * 这是 Docker Hub / ghcr / quay 这类 registry 的**标准**认证方式：
+ * 匿名请求先吃 401，客户端拿 realm 去换一个（匿名或带账号的）token，
+ * 再用 `Authorization: Bearer <token>` 重试。`docker pull` 自动做这件事。
+ */
+export function parseBearerChallenge(headerValue) {
+  if (!headerValue) return null;
+  const head = /^\s*Bearer\s+(.*)$/i.exec(String(headerValue));
+  if (!head) return null;
+  const params = {};
+  // key="value" 或 key=value，值里可能有逗号（scope 常有），所以优先吃引号形式。
+  const re = /([a-zA-Z0-9_]+)\s*=\s*(?:"([^"]*)"|([^,\s]+))/g;
+  let match;
+  while ((match = re.exec(head[1])) !== null) {
+    params[match[1].toLowerCase()] = match[2] ?? match[3];
+  }
+  if (!params.realm) return null;
+  return { realm: params.realm, service: params.service ?? '', scope: params.scope ?? '' };
+}
+
+/**
+ * 从请求路径与方法推出 token 需要的 scope。
+ *
+ * 挑战头里通常不带 scope，得自己拼；读用 `pull`，写用 `pull,push`。
+ * 匿名账号申请 `push` 会被拒，所以不能一律要 `pull,push`。
+ */
+export function scopeForPath(path, method = 'GET') {
+  const matched = /^\/v2\/(.+?)\/(manifests|blobs|tags)\b/.exec(String(path ?? ''));
+  if (!matched) return null;
+  const name = matched[1];
+  const write = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method).toUpperCase());
+  return `repository:${name}:${write ? 'pull,push' : 'pull'}`;
+}
+
 export class RegistryClient {
   constructor({ url, proxy = '', timeoutMs = REQUEST_TIMEOUT_MS, auth }) {
     this.baseUrl = normalizeBaseUrl(url);
@@ -110,10 +153,104 @@ export class RegistryClient {
     } else {
       this.authHeader = undefined;
     }
+    /** scope -> { token, expiresAt }；Bearer token 缓存，避免每个请求都去换一次。 */
+    this.tokenCache = new Map();
+    /** 缓存最近一次看到的 Bearer 挑战，用于给"不可重放的流式请求"提前取 token。 */
+    this.bearerChallenge = null;
   }
 
   get host() {
     return this.baseUrl.replace(/^https?:\/\//i, '');
+  }
+
+  /**
+   * 取一个可用的 Bearer token（命中缓存则直接返回）。
+   *
+   * 没有挑战信息时先 ping 一次 `/v2/` 把挑战头拿回来 —— 这是流式请求
+   * （body 不可重放、无法"401 后重试"）能够带认证的前提。
+   */
+  async tokenFor(scope, { signal, dispatcher } = {}) {
+    if (!scope) return null;
+    const hit = this.tokenCache.get(scope);
+    if (hit && Date.now() < hit.expiresAt) {
+      return hit.token;
+    }
+    this.tokenCache.delete(scope);
+
+    if (!this.bearerChallenge) {
+      const discovered = await this.#discoverChallenge({ signal, dispatcher });
+      if (!discovered) return null;
+    }
+    const challenge = this.bearerChallenge;
+    const url = new URL(challenge.realm);
+    if (challenge.service) {
+      url.searchParams.set('service', challenge.service);
+    }
+    const effectiveScope = challenge.scope || scope;
+    if (effectiveScope) {
+      url.searchParams.set('scope', effectiveScope);
+    }
+    const headers = { 'Cache-Control': 'no-cache' };
+    // 私有仓库要用账号去换 token；匿名场景不带。
+    if (this.authHeader) {
+      headers.Authorization = this.authHeader;
+    }
+    const response = await undiciFetch(url, {
+      method: 'GET',
+      headers,
+      signal,
+      dispatcher: dispatcher ?? this.dispatcher,
+    });
+    if (!response.ok) {
+      throw new RegistryError(
+        `申请访问令牌失败（HTTP ${response.status}，令牌服务 ${url.host}）`,
+        response.status === 401 || response.status === 403 ? 'UNAUTHORIZED' : 'AUTH_FAILED',
+        { status: response.status }
+      );
+    }
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new RegistryError('令牌服务返回了非 JSON 响应', 'INVALID_RESPONSE');
+    }
+    const token = payload?.token || payload?.access_token;
+    if (!token) {
+      throw new RegistryError('令牌服务未返回 token / access_token', 'AUTH_FAILED');
+    }
+    const expiresIn = Number(payload?.expires_in) || 60;
+    this.tokenCache.set(scope, {
+      token,
+      // 留 30s 余量，避免"刚拿到就过期"。
+      expiresAt: Date.now() + Math.max(30, expiresIn - 30) * 1000,
+    });
+    return token;
+  }
+
+  /** 当前已知的 Bearer 挑战信息（用于把 realm 写进报错，便于定位）。 */
+  #challengeInfo() {
+    return this.bearerChallenge?.realm ? { bearerRealm: this.bearerChallenge.realm } : {};
+  }
+
+  /** ping `/v2/` 只为拿挑战头；401 也算成功（本就是为了拿 realm）。 */
+  async #discoverChallenge({ signal, dispatcher } = {}) {
+    try {
+      const response = await undiciFetch(`${this.baseUrl}/v2/`, {
+        method: 'GET',
+        headers: { 'Cache-Control': 'no-cache' },
+        redirect: 'follow',
+        signal,
+        dispatcher: dispatcher ?? this.dispatcher,
+      });
+      const challenge = parseBearerChallenge(response.headers.get('www-authenticate'));
+      if (challenge) {
+        this.bearerChallenge = challenge;
+        return challenge;
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -143,15 +280,48 @@ export class RegistryClient {
     if (this.authHeader) {
       headers.Authorization = this.authHeader;
     }
-    try {
-      return await undiciFetch(`${this.baseUrl}${path}`, {
+
+    // 有缓存 token 就直接带上，省掉一次 401 往返。
+    const scope = scopeForPath(path, method);
+    const cachedToken = scope ? this.tokenCache.get(scope)?.token : undefined;
+    if (cachedToken) {
+      headers.Authorization = `Bearer ${cachedToken}`;
+    }
+
+    const send = (overrideHeaders) =>
+      undiciFetch(`${this.baseUrl}${path}`, {
         method,
-        headers,
+        headers: overrideHeaders,
         redirect,
         signal: controller.signal,
         dispatcher: dispatcher ?? this.dispatcher,
       });
+
+    try {
+      let response = await send(headers);
+      // 401 + Bearer 挑战 → 去 realm 换 token 再重试一次。
+      // 这是 Docker Hub / ghcr / quay 的标准路径；只靠 Basic 是进不去的。
+      if (response.status === 401) {
+        const challenge = parseBearerChallenge(response.headers.get('www-authenticate'));
+        if (challenge) {
+          this.bearerChallenge = challenge;
+          // 之前那个 token 没能通过，清掉强制重取。
+          if (scope) {
+            this.tokenCache.delete(scope);
+          }
+          const token = await this.tokenFor(scope, { signal, dispatcher });
+          if (token) {
+            response = await send({ ...headers, Authorization: `Bearer ${token}` });
+          }
+        }
+      }
+      return response;
     } catch (error) {
+      // 已经带语义的错误（例如令牌申请失败）原样抛出，别包装成"连不上" ——
+      // 那会把真实的认证失败掩盖成网络问题，排查方向完全跑偏。
+      if (error instanceof RegistryError) {
+        throw error;
+      }
       // undici 在不可达 IP 上抛 ECONNREFUSED，错误名也是 AbortError；
       // 通过 message / code 进一步区分"对端拒连"和"我们自己主动取消"。
       const name = error?.name ?? '';
@@ -242,7 +412,7 @@ export class RegistryClient {
     if (response.status === 401) {
       const message =
         origin === 'source'
-          ? sourceAuthMessage(401)
+          ? sourceAuthMessage(401, this.#challengeInfo())
           : origin === 'dest'
           ? destAuthMessage(401, this.host)
           : '镜像仓库要求认证（HTTP 401）：本仓库的凭据在 registry.config.json / REGISTRY_USERNAME 里配置，外部源的凭据在「凭据管理」里维护。';
@@ -328,7 +498,9 @@ export class RegistryClient {
     }
     if (response.status === 401 || response.status === 403) {
       throw new RegistryError(
-        origin === 'source' ? sourceAuthMessage(response.status) : destAuthMessage(response.status, repository),
+        origin === 'source'
+          ? sourceAuthMessage(response.status, this.#challengeInfo())
+          : destAuthMessage(response.status, repository),
         origin === 'source' ? 'SOURCE_UNAUTHORIZED' : 'DEST_FORBIDDEN',
         { status: response.status }
       ).withOrigin(origin);
@@ -393,7 +565,7 @@ export class RegistryClient {
       ).withOrigin('source');
     }
     if (response.status === 401 || response.status === 403) {
-      throw new RegistryError(sourceAuthMessage(response.status), 'SOURCE_UNAUTHORIZED', {
+      throw new RegistryError(sourceAuthMessage(response.status, this.#challengeInfo()), 'SOURCE_UNAUTHORIZED', {
         status: response.status,
       }).withOrigin('source');
     }
@@ -426,7 +598,7 @@ export class RegistryClient {
       );
     }
     if (response.status === 401 || response.status === 403) {
-      throw new RegistryError(sourceAuthMessage(response.status), 'SOURCE_UNAUTHORIZED', {
+      throw new RegistryError(sourceAuthMessage(response.status, this.#challengeInfo()), 'SOURCE_UNAUTHORIZED', {
         status: response.status,
       }).withOrigin('source');
     }
@@ -462,7 +634,7 @@ export class RegistryClient {
       );
     }
     if (response.status === 401 || response.status === 403) {
-      throw new RegistryError(sourceAuthMessage(response.status), 'SOURCE_UNAUTHORIZED', {
+      throw new RegistryError(sourceAuthMessage(response.status, this.#challengeInfo()), 'SOURCE_UNAUTHORIZED', {
         status: response.status,
       }).withOrigin('source');
     }
@@ -618,11 +790,30 @@ export class RegistryClient {
     try {
       nodeSource.pipe(passthrough);
 
+      // 流式 body 不可重放，没法走"401 后换 token 重试"。
+      //
+      // 但只在**已经发现过 Bearer 挑战**时才预取：这个上传流程的第一个请求
+      // （POST /blobs/uploads/）已经走过 #request，真需要 token 的话那时就发现了。
+      // 无条件调用会为了拿挑战而多打一次匿名 /v2/，对 Basic / 匿名的 registry
+      // 纯属浪费，在受保护的仓库上还可能触发匿名访问告警。
+      const scope = scopeForPath(url.pathname, 'PATCH');
+      let bearer;
+      if (scope && this.bearerChallenge) {
+        try {
+          bearer = await this.tokenFor(scope, { signal });
+        } catch {
+          // 取 token 失败不在这里报错：让下面正式的请求去暴露真实状态码。
+          bearer = undefined;
+        }
+      }
+
       const headers = { 'Content-Type': 'application/octet-stream' };
       if (contentLength && Number.isFinite(contentLength)) {
         headers['Content-Length'] = String(contentLength);
       }
-      if (this.authHeader) {
+      if (bearer) {
+        headers.Authorization = `Bearer ${bearer}`;
+      } else if (this.authHeader) {
         headers.Authorization = this.authHeader;
       }
       const response = await undiciFetch(url, {
@@ -710,7 +901,11 @@ export class RegistryClient {
     }
     try {
       const headers = { 'Content-Type': contentType };
-      if (this.authHeader) {
+      const manifestScope = scopeForPath(`/v2/${destRepo}/manifests/${tag}`, 'PUT');
+      const manifestToken = manifestScope ? this.tokenCache.get(manifestScope)?.token : undefined;
+      if (manifestToken) {
+        headers.Authorization = `Bearer ${manifestToken}`;
+      } else if (this.authHeader) {
         headers.Authorization = this.authHeader;
       }
       const response = await undiciFetch(`${this.baseUrl}/v2/${destRepo}/manifests/${tag}`, {
