@@ -56,6 +56,7 @@ import {
   DEST_TAG_PATTERN,
   formatBytes,
   formatDateTime,
+  nextJobExpansion,
   parseImageReference,
   shortDigest,
   splitRepoTag,
@@ -80,13 +81,6 @@ interface FormValues {
 }
 
 const POLL_INTERVAL_MS = 1500;
-
-/**
- * 失败 / 取消的任务行默认展开，方便用户直接看到错误原因。
- */
-function defaultExpandedKeys(jobs: PullJob[]): string[] {
-  return jobs.filter((j) => j.status === 'failed' || j.status === 'cancelled').map((j) => j.id);
-}
 
 /** 把凭据 id 翻译成「名称（账号）」以供预览/列表展示。 */
 function resolveCredentialLabel(id: string, list: Credential[] = []): string {
@@ -193,6 +187,39 @@ export default function PullPage({ config }: Props) {
   const host = config?.host ?? '';
   /** 用户是否手动改过「目标镜像名」——改过就不再跟随源镜像，免得把人的输入冲掉。 */
   const destTouchedRef = useRef(false);
+
+  /**
+   * 任务行的展开状态（受控）。
+   *
+   * 行为：
+   *   - **首屏保持收起** —— 那是历史记录，一上来就铺满详情很吵；
+   *   - 之后**新出现**的失败 / 取消任务自动展开一次，让你不用点就能看到原因；
+   *   - 用户手动收放完全自由，且收起后不会被 1.5s 一次的轮询再弹开。
+   *
+   * 必须传 onExpandedRowsChange：只给 expandedRowKeys 是"受控但没有回调"，
+   * antd 无法改状态，于是点开就收不回去（之前就是这个 bug）。
+   */
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+  const autoExpandedRef = useRef<Set<string>>(new Set());
+  const firstLoadRef = useRef(true);
+  useEffect(() => {
+    // 迁移逻辑抽在 utils.nextJobExpansion 里（纯函数、已单测），
+    // 组件这里只负责把结果落进 state。
+    const next = nextJobExpansion({
+      jobs,
+      prevKeys: expandedKeys,
+      autoHandled: autoExpandedRef.current,
+      firstLoad: firstLoadRef.current,
+    });
+    autoExpandedRef.current = next.autoHandled;
+    firstLoadRef.current = next.firstLoad;
+    if (next.keys.length !== expandedKeys.length || next.keys.some((id, i) => id !== expandedKeys[i])) {
+      setExpandedKeys(next.keys);
+    }
+    // expandedKeys 故意不进依赖：这个 effect 只应由任务列表变化驱动，
+    // 否则会形成"改了 state 又触发自己"的回环。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs]);
 
   /**
    * 源镜像变化时，把目标镜像名同步成"同名"（去掉主机前缀后的 <repo>:<tag>）。
@@ -871,9 +898,11 @@ export default function PullPage({ config }: Props) {
           pagination={false}
           expandable={{
             expandedRowRender: (job) => <JobPhases job={job} />,
-            rowExpandable: (job) => job.status === 'failed' || job.status === 'cancelled',
-            defaultExpandAllRows: false,
-            expandedRowKeys: defaultExpandedKeys(jobs),
+            // 每一行都可展开：成功 / 进行中的任务也常有"看看到底走到哪一层"的需求，
+            // 而且每行都有箭头才不会让人以为"这行点不动"。
+            rowExpandable: () => true,
+            expandedRowKeys: expandedKeys,
+            onExpandedRowsChange: (keys) => setExpandedKeys(keys.map(String)),
           }}
           locale={{
             emptyText: (

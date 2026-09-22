@@ -225,3 +225,47 @@ function execCommandCopy(text: string): boolean {
   }
   return copied;
 }
+
+/**
+ * 任务列表「哪些行展开」的状态迁移（纯函数，便于单测）。
+ *
+ * 规则：
+ *   - 首屏（firstLoad）保持全部收起 —— 那是历史记录，一上来铺满详情很吵；
+ *   - 之后新出现的失败 / 取消任务自动展开一次，让用户不用点就知道原因；
+ *   - 用户手动收放完全自由：同一个任务不会被重复自动展开。
+ *
+ * 为什么需要它：AntD Table 的 expandedRowKeys 是**受控**属性，
+ * 只传它而不传 onExpandedRowsChange，用户点了也改不了状态（收不回去）。
+ * 状态必须由这里管，组件通过回调同步。
+ */
+export function nextJobExpansion({
+  jobs,
+  prevKeys,
+  autoHandled,
+  firstLoad,
+}: {
+  jobs: { id: string; status: string }[];
+  prevKeys: string[];
+  autoHandled: Set<string>;
+  firstLoad: boolean;
+}): { keys: string[]; autoHandled: Set<string>; firstLoad: boolean } {
+  const alive = new Set(jobs.map((j) => j.id));
+  const handled = new Set(autoHandled);
+
+  if (firstLoad) {
+    // 首屏：全部都标记为"已处理"，但一行都不展开
+    jobs.forEach((j) => handled.add(j.id));
+    return { keys: prevKeys.filter((id) => alive.has(id)), autoHandled: handled, firstLoad: false };
+  }
+
+  const fresh = jobs
+    .filter(
+      (j) =>
+        (j.status === 'failed' || j.status === 'cancelled') && !handled.has(j.id)
+    )
+    .map((j) => j.id);
+  fresh.forEach((id) => handled.add(id));
+
+  const kept = prevKeys.filter((id) => alive.has(id));
+  return { keys: [...kept, ...fresh], autoHandled: handled, firstLoad: false };
+}
