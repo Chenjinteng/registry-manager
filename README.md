@@ -512,3 +512,9 @@ sudo chown -R 1000:1000 ./data
 -e REGISTRY_CREDENTIALS_DIR=/tmp/registry-manager-data
 ```
 
+## 许可证
+
+[MIT](./LICENSE) © 2026 Chenjinteng
+
+问题与建议请提到 [Issues](https://github.com/Chenjinteng/registry-manager/issues)。
+

@@ -5,6 +5,16 @@
   "description": "独立的 CNCF Distribution 镜像仓库管理 Web",
   "type": "module",
   "packageManager": "pnpm@11.20.0",
+  "license": "MIT",
+  "author": "Chenjinteng",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Chenjinteng/registry-manager.git"
+  },
+  "homepage": "https://github.com/Chenjinteng/registry-manager#readme",
+  "bugs": {
+    "url": "https://github.com/Chenjinteng/registry-manager/issues"
+  },
   "engines": {
     "node": ">=20"
   },
