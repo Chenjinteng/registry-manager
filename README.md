@@ -19,6 +19,7 @@
 没有登录、没有数据库。清单在内存里缓存，重启即重新扫描。
 
 版本变更见 [CHANGELOG.md](./CHANGELOG.md)；版本号规则见 [AGENTS.md](./AGENTS.md#版本号规则)。
+<img width="1855" height="927" alt="image" src="https://github.com/user-attachments/assets/512b97af-bb66-4ef6-9686-9eb05fe991ef" />
 
 ## 为什么需要一个服务端
 
