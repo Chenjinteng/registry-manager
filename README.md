@@ -2,7 +2,7 @@
 
 一个独立的 Web 工具，用来浏览和管理 **CNCF Distribution**（Docker Registry HTTP API V2）里的镜像。
 
-不依赖 平台：UI 只沿用了它的视觉 token 与 Ant Design 主题，代码零耦合，可以单独部署。
+单进程、可独立部署：运行时只依赖 Express 与 undici，前端产物由 Vite 打包后同源托管。
 
 ## 它能做什么
 

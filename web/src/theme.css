@@ -1,7 +1,8 @@
 /*
- * 设计 token 直接取自 平台 的 light 语义色板（web/src/theme/defaults.ts），
- * 变量名与 平台 的 CSS 变量约定一致（web/src/theme/css-adapter.ts）。
- * 这样页面不需要依赖 平台 的任何代码，却能保持同一套视觉语言。
+ * 语义化设计 token（light 主题）。
+ *
+ * 所有颜色都以语义命名（primary / text-N / bg-N / border-N / fill-N / error ...），
+ * 组件里只允许引用 var(--color-*)，不要写死色值 —— 这样换主题只需要改这个文件。
  */
 :root {
   --color-primary: #155aef;

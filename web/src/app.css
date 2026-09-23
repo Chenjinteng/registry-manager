@@ -1,9 +1,7 @@
 /*
  * 应用外壳与页面骨架。
  *
- * 结构对齐 平台 控制台（web/src/app/layout.tsx 的 header + main，
- * 以及 web/src/components/sub-layout 的 segmented 分支）：
- *   header（sticky 顶栏）→ main（p-4）→ 顶部横向 Segmented 导航 → 内容区
+ * 整体结构：header（sticky 顶栏）→ main（p-4）→ 顶部横向 Segmented 导航 → 内容区
  * 颜色一律走 theme.css 里的语义 token。
  */
 
@@ -20,8 +18,8 @@
 }
 
 /*
- * 顶栏。平台 的 .header-bg 默认透明，靠滚动监听在滚动后加背景；
- * 这里直接用页面底色：与透明在视觉上等价（底色相同），但内容绝不会透出来。
+ * 顶栏。直接使用页面底色，而不是"透明 + 滚动后加背景"：
+ * 视觉上等价（底色相同），但内容绝不会从顶栏下面透出来。
  */
 .app-header {
   position: sticky;
@@ -75,7 +73,7 @@
   max-width: 340px;
 }
 
-/* main：平台 的 .main-content 是 flex-1 + p-4 + 内阴影。 */
+/* main：flex-1 + p-4 + 顶部一道很淡的内阴影。 */
 .app-main {
   display: flex;
   flex: 1;
@@ -174,7 +172,7 @@
   gap: 12px;
 }
 
-/* 解剖对齐 平台 summary-metric-card：rounded-lg + border + bg-1 */
+/* 指标卡：圆角 + 边框 + 语义底色 */
 .metric-card {
   display: flex;
   flex-direction: column;

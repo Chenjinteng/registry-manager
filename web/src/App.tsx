@@ -18,9 +18,9 @@ import type { AppConfig, Inventory } from './types';
 type PageKey = 'images' | 'pull' | 'credentials' | 'proxies' | 'settings';
 
 /**
- * 布局对齐 平台 控制台（web/src/app/layout.tsx + web/src/components/sub-layout）：
+ * 整体布局：
  *   header（顶栏）→ main（p-4）→ 顶部横向 Segmented 导航 → 页面内容
- * 应用内导航在顶部，而不是左侧栏。
+ * 应用内导航放在顶部，而不是左侧栏。
  */
 const NAV_ITEMS: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'images', label: '镜像列表', icon: <DockerOutlined /> },

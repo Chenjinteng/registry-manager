@@ -7,8 +7,8 @@ import App from './App';
 import './theme.css';
 import './app.css';
 
-// 与 平台 的 AntD 适配保持一致（web/src/theme/antd-adapter.ts），
-// 让控件层的默认外观与主控制台同源。
+// AntD 主题适配：token 与 theme.css 的语义色板对齐，
+// 让 AntD 控件的默认外观与本应用的视觉语言一致。
 const antdTheme = {
   cssVar: true,
   token: {

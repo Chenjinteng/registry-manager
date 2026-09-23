@@ -1,9 +1,8 @@
 import type { ReactNode } from 'react';
 
 /**
- * 指标卡。解剖对齐 平台 的 summary-metric-card（vertical 布局）：
- *   图标块（28×28、圆角、语义色底）+ 13px 标签 / 下方为数值
- * 卡片本身是 rounded-lg + border + --color-bg-1。
+ * 指标卡：图标块（28×28、圆角、语义色底）+ 13px 标签，下方为数值。
+ * 卡片本身是圆角 + 边框 + --color-bg-1，样式见 app.css 的 .metric-card。
  */
 export default function MetricCard({
   label,

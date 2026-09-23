@@ -7,17 +7,16 @@
 一个**独立**的 CNCF Distribution（Docker Registry HTTP API V2）镜像仓库管理 Web 工具：
 浏览镜像、查看每个 tag 的 digest/架构/层数/体积/构建时间、复制 `docker pull`、按 digest 删除 manifest。
 
-它**不依赖 平台**，只沿用了后者的视觉 token（`web/src/theme.css`，取自 平台
-`web/src/theme/defaults.ts` 的 light 语义色板）。不要把 平台 的模块、权限、i18n
-或 Django 后端引进来。
+它**是一个自成一体的小工具**：服务端只有 Express + undici，前端是 React + Ant Design，
+没有后端框架、没有 ORM、没有 i18n 体系。不要把大平台的模块、权限、国际化
+或服务端框架引进来 —— 这个工具的卖点就是"小到能看懂、能单独跑起来"。
 
 刻意不做的事：**没有登录，没有数据库，没有多实例配置**。一次管理一个 registry。
 这些是产品决定，不是未完成项；要加先问。
 
 ## 版本号规则
 
-形如 `主.中.小` 三位，**不要**套用 平台 那套（社区版按日期、商业版按自然月）；
-本工具是独立发布的，用自己的三位版本。
+形如 `主.中.小` 三位，按下面的规则维护。
 
 | 位 | 何时 +1 | 谁来定 |
 | --- | --- | --- |
@@ -171,10 +170,10 @@ node server/index.mjs
 
 ## 视觉约定
 
-- 结构对齐 平台 控制台：`header`（sticky 顶栏）→ `main`（`p-4`）→ **顶部横向 `Segmented` 导航**
-  → 内容区。应用内导航在**顶部**，不要改成左侧栏。
+- 结构：`header`（sticky 顶栏）→ `main`（`p-4`）→ **顶部横向 `Segmented` 导航** → 内容区。
+  应用内导航在**顶部**，不要改成左侧栏。
 - 颜色一律用 `web/src/theme.css` 里的语义 token（`var(--color-*)`），不要写死色值。
-- KPI 卡解剖对齐 平台 的 `summary-metric-card`：图标块 28×28（语义色底）+ 13px 标签 + 粗体数值。
+- KPI 卡：图标块 28×28（语义色底）+ 13px 标签 + 粗体数值，样式见 `app.css` 的 `.metric-card`。
 
 ## 容器
 
