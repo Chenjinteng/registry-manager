@@ -15,6 +15,7 @@ import type {
   ProxyTestResult,
   PullJob,
   PullJobInput,
+  StatsClients,
   StatsEvents,
   StatsRepositories,
   StatsSeries,
@@ -171,6 +172,10 @@ export const fetchRepositoryStats = (days: number) =>
 
 export const fetchStatsEvents = (limit = 50) =>
   request<StatsEvents>(`/api/stats/events?limit=${limit}`);
+
+/** 按客户端聚合的"见过的客户端"。`days=0` 表示不限（当前实现里由页面传时间窗）。 */
+export const fetchStatsClients = (days: number) =>
+  request<StatsClients>(`/api/stats/clients?days=${days}`);
 
 /**
  * 清空全部热度数据（不按保留期），用于口径改正后从头重计。

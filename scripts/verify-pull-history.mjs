@@ -83,7 +83,7 @@ const terminalJob = (over = {}) => ({
     return { version, tables };
   };
 
-  check('老库（user_version=1）一路升到当前版本', inspect().version === 3, String(inspect().version));
+  check('老库（user_version=1）一路升到当前版本', inspect().version === 4, String(inspect().version));
   check(
     '升级后原有的热度数据一条没丢',
     upgraded.summary({ days: 3650 }).total === 7,
@@ -104,8 +104,10 @@ const terminalJob = (over = {}) => ({
    * 中间某一步被 `return` 掉、或者只有一步用了 `current === N` 判断，都会少建表。
    */
   check(
-    '跨版本升级（v1→v3）两步都跑到了：拉取历史表与忽略规则表都在',
-    inspect().tables.includes('pull_jobs') && inspect().tables.includes('ignored_clients')
+    '跨版本升级（v1→v4）每一步都跑到了：拉取历史、忽略规则、客户端清单都在',
+    inspect().tables.includes('pull_jobs') &&
+      inspect().tables.includes('ignored_clients') &&
+      inspect().tables.includes('client_seen')
   );
   upgraded.addIgnoredClient('after-upgrade/1.0', iso(0));
   check(
@@ -116,7 +118,7 @@ const terminalJob = (over = {}) => ({
   upgraded.close();
 }
 
-// ───────────────────── 一点五、迁移：v2 库（有热度 + 拉取历史）升到 v3 ─────────────────────
+// ───────────────────── 一点五、迁移：v2 库（有热度 + 拉取历史）升到 v4 ─────────────────────
 {
   const v2File = join(dir, 'legacy-v2.db');
   {
@@ -144,15 +146,22 @@ const terminalJob = (over = {}) => ({
 
   const upgradedV2 = new Db({ filePath: v2File });
   check(
-    'v2 → v3：原有的热度数据一条没丢',
+    'v2 → v4：原有的热度数据一条没丢（跨两步迁移）',
     upgradedV2.summary({ days: 3650 }).total === 3,
     JSON.stringify(upgradedV2.summary({ days: 3650 }))
   );
-  check('v2 → v3：忽略规则表是空的（不是"迁移时顺手塞规则"）', upgradedV2.listIgnoredClients().length === 0);
+  check('v2 → v4：忽略规则表是空的（不是"迁移时顺手塞规则"）', upgradedV2.listIgnoredClients().length === 0);
   upgradedV2.addIgnoredClient('v2-upgraded/1.0', iso(0));
-  check('v2 → v3：升级后立刻能写规则', upgradedV2.listIgnoredClients().length === 1);
+  check('v2 → v4：升级后立刻能写规则', upgradedV2.listIgnoredClients().length === 1);
+  check('v2 → v4：补出了客户端清单表且是空的', upgradedV2.listClients({ days: 0 }).length === 0);
+  upgradedV2.recordClient({ useragent: 'v2-upgraded/1.0', at: iso(0), counted: true });
   check(
-    'v2 → v3：没有被"重建表"（老的热度行还在，不可能被清）',
+    'v2 → v4：升级后立刻能记客户端',
+    upgradedV2.listClients({ days: 0 })[0]?.useragent === 'v2-upgraded/1.0',
+    JSON.stringify(upgradedV2.listClients({ days: 0 }))
+  );
+  check(
+    'v2 → v4：没有被"重建表"（老的热度行还在，不可能被清）',
     (() => {
       const raw = new DatabaseSync(v2File);
       const row = raw.prepare("SELECT events FROM activity_daily WHERE repository='redis'").get();

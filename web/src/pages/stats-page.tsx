@@ -24,6 +24,7 @@ import IgnoreRuleModal from '../components/ignore-rule-modal';
 
 import {
   fetchConfig,
+  fetchStatsClients,
   fetchStatsEvents,
   fetchStatsSeries,
   fetchStatsSummary,
@@ -35,6 +36,7 @@ import type {
   ApiResult,
   AppConfig,
   IgnoreRules,
+  StatsClientItem,
   StatsEventItem,
   StatsEvents,
   StatsSeriesPoint,
@@ -95,6 +97,7 @@ export default function StatsPage({ config, onConfigChange }: Props) {
   const [topItems, setTopItems] = useState<StatsTopItem[]>([]);
   const [points, setPoints] = useState<StatsSeriesPoint[]>([]);
   const [events, setEvents] = useState<StatsEventItem[]>([]);
+  const [clients, setClients] = useState<StatsClientItem[]>([]);
   const [eventTotals, setEventTotals] = useState<StatsEvents['totals'] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<ApiResult<unknown> | null>(null);
@@ -159,13 +162,15 @@ export default function StatsPage({ config, onConfigChange }: Props) {
     setError(null);
     void (async () => {
       // 四路并发：任何一路失败都不影响其它块渲染，缺哪块提示哪块。
-      const [summaryResult, topResult, seriesResult, eventsResult] = await Promise.all([
-        fetchStatsSummary(days),
-        fetchStatsTop(days, topBy),
-        // 日历固定看 12 个月，与上面的时间窗无关（原因见 HEATMAP_DAYS 的注释）。
-        fetchStatsSeries(HEATMAP_DAYS),
-        fetchStatsEvents(50),
-      ]);
+      const [summaryResult, topResult, seriesResult, eventsResult, clientsResult] =
+        await Promise.all([
+          fetchStatsSummary(days),
+          fetchStatsTop(days, topBy),
+          // 日历固定看 12 个月，与上面的时间窗无关（原因见 HEATMAP_DAYS 的注释）。
+          fetchStatsSeries(HEATMAP_DAYS),
+          fetchStatsEvents(50),
+          fetchStatsClients(days),
+        ]);
       if (cancelled) {
         return;
       }
@@ -182,7 +187,10 @@ export default function StatsPage({ config, onConfigChange }: Props) {
         setEvents(eventsResult.data.items);
         setEventTotals(eventsResult.data.totals);
       }
-      const failure = [summaryResult, topResult, seriesResult, eventsResult].find(
+      if (clientsResult.success && clientsResult.data) {
+        setClients(clientsResult.data.items);
+      }
+      const failure = [summaryResult, topResult, seriesResult, eventsResult, clientsResult].find(
         (item) => !item.success
       );
       if (failure) {
@@ -250,6 +258,92 @@ export default function StatsPage({ config, onConfigChange }: Props) {
       width: 170,
       sorter: (left, right) => (left.lastAt ?? '').localeCompare(right.lastAt ?? ''),
       render: (value: string | null) => formatDateTime(value),
+    },
+  ];
+
+  /**
+   * 「见过的客户端」列。
+   *
+   * 这一块存在的理由：200 条的「最近事件」实测只覆盖最近十几小时，而且重启就空 ——
+   * 一个一天只来一次的客户端，你还没打开页面它就已经被挤出去了，但热度每天都在被它污染。
+   * 按 UA 聚合之后行数与事件量无关（现实里十几个），所以"有没有我没见过的在打"随时答得上来。
+   */
+  const clientColumns: ColumnsType<StatsClientItem> = [
+    {
+      title: '客户端',
+      dataIndex: 'useragent',
+      key: 'useragent',
+      ellipsis: { showTitle: false },
+      render: (value: string) => (
+        <Tooltip title={value}>
+          <span className="mono ellipsis" style={{ display: 'block' }}>
+            {value || '—'}
+          </span>
+        </Tooltip>
+      ),
+    },
+    {
+      title: '事件数',
+      dataIndex: 'events',
+      key: 'events',
+      width: 90,
+      sorter: (left, right) => left.events - right.events,
+    },
+    {
+      title: '计入',
+      dataIndex: 'counted',
+      key: 'counted',
+      width: 90,
+      sorter: (left, right) => left.counted - right.counted,
+      // 一条都没计入 = 已经被规则排掉了，弱化显示；有计入的才是"正在影响热度"的。
+      render: (value: number, record) =>
+        value > 0 ? (
+          <span style={{ color: 'var(--color-text-1)' }}>{value}</span>
+        ) : (
+          <Tooltip title={record.self ? '本工具自己的读取请求，本来就不计入' : '全部被忽略规则排掉了'}>
+            <span style={{ color: 'var(--color-text-4)' }}>0</span>
+          </Tooltip>
+        ),
+    },
+    {
+      title: '首次见到',
+      dataIndex: 'firstSeenAt',
+      key: 'firstSeenAt',
+      width: 170,
+      sorter: (left, right) => left.firstSeenAt.localeCompare(right.firstSeenAt),
+      render: (value: string) => formatDateTime(value),
+    },
+    {
+      title: '最近见到',
+      dataIndex: 'lastSeenAt',
+      key: 'lastSeenAt',
+      width: 170,
+      defaultSortOrder: 'descend',
+      sorter: (left, right) => left.lastSeenAt.localeCompare(right.lastSeenAt),
+      render: (value: string) => formatDateTime(value),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 100,
+      render: (_, record) => {
+        if (record.self) {
+          return <span style={{ color: 'var(--color-text-4)', fontSize: 12 }}>本工具</span>;
+        }
+        if (isIgnoredUa(record.useragent)) {
+          return <Tag style={{ marginInlineEnd: 0 }}>已忽略</Tag>;
+        }
+        return (
+          <Button
+            type="link"
+            size="small"
+            style={{ padding: 0, height: 'auto' }}
+            onClick={() => setIgnoreModal({ open: true, suggested: record.useragent.split(' ')[0] })}
+          >
+            忽略
+          </Button>
+        );
+      },
     },
   ];
 
@@ -577,6 +671,33 @@ export default function StatsPage({ config, onConfigChange }: Props) {
         />
       </div>
 
+      {/*
+        放在「最近事件」**上面**：这一块才是"谁在打"的答案（不受 200 条窗口限制、
+        重启也不丢），下面那个回答的是"最近发生了什么细节"。
+      */}
+      <div className="panel" style={{ padding: 16 }}>
+        <div className="stats-panel-head">
+          <h3 className="stats-panel-title">见过的客户端（近 {days} 天）</h3>
+          <span style={{ fontSize: 12, color: 'var(--color-text-3)' }}>
+            「计入 0」= 收到过但被规则排掉了；这一行不存在才是真的没来过
+          </span>
+        </div>
+        <Table<StatsClientItem>
+          rowKey="useragent"
+          size="small"
+          loading={loading}
+          columns={clientColumns}
+          dataSource={clients}
+          pagination={{
+            size: 'small',
+            hideOnSinglePage: true,
+            defaultPageSize: 10,
+            showTotal: (total) => `共 ${total} 个客户端`,
+          }}
+          locale={{ emptyText: <Empty description="这个时间窗内还没收到任何事件" /> }}
+        />
+      </div>
+
       <Collapse
         items={[
           {
@@ -596,6 +717,13 @@ export default function StatsPage({ config, onConfigChange }: Props) {
                   <Tooltip title="服务端自己发往 registry 的读取请求（重新扫描时按 tag 读 manifest 与 image config，一次上百条）。它们永远不计入热度，纯噪音，所以折叠成一个数字。注意：服务端自己**计入热度**的那些（用「镜像拉取」搬进来的 manifest）照常列在下方。">
                     <span style={{ fontSize: 12, color: 'var(--color-text-4)' }}>
                       自身读取 {eventTotals.self} 条
+                    </span>
+                  </Tooltip>
+                ) : null}
+                {eventTotals?.ignored ? (
+                  <Tooltip title="已被忽略规则排掉的事件：既不计入热度，也不再占这个 200 条的窗口（窗口实测只覆盖最近十几小时，该留给你还没处理过的客户端）。它们的账在上面「见过的客户端」里。">
+                    <span style={{ fontSize: 12, color: 'var(--color-text-4)' }}>
+                      已忽略折叠 {eventTotals.ignored} 条
                     </span>
                   </Tooltip>
                 ) : null}

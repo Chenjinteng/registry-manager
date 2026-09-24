@@ -437,22 +437,100 @@ try {
       JSON.stringify({ 配置: ignoredCfg, 标题: panelHeader?.slice(0, 100) })
     );
     /*
+     * 「见过的客户端」：这一块才是"谁在打"的答案。它必须**不用展开**就能看见，
+     * 而且"已被规则排掉的客户端"要显示成「已忽略」而不是给一个还会再点一次的按钮。
+     */
+    const clientPanel = await evaluate(`(() => {
+      const title = [...document.querySelectorAll('.stats-panel-title')]
+        .find((h) => h.innerText.includes('见过的客户端'));
+      const panel = title?.closest('.panel');
+      if (!panel) return null;
+      const headers = [...panel.querySelectorAll('thead th')].map((th) => th.innerText.trim());
+      const rows = [...panel.querySelectorAll('tbody tr')].map((tr) =>
+        [...tr.querySelectorAll('td')].map((td) => td.innerText.replace(/\\s+/g, ' ').trim())
+      );
+      const body = panel.querySelector('.ant-table-body') || panel.querySelector('.ant-table-content');
+      return {
+        headers,
+        rows,
+        scrollWidth: body?.scrollWidth ?? 0,
+        clientWidth: body?.clientWidth ?? 0,
+        collapsed: !panel.closest('.ant-collapse'),
+      };
+    })()`);
+    check(
+      '「见过的客户端」面板不用展开就能看到（它才是"谁在打"的答案）',
+      clientPanel !== null && clientPanel.collapsed === true,
+      JSON.stringify({ found: clientPanel !== null, collapsed: clientPanel?.collapsed })
+    );
+    check(
+      '列齐：客户端 / 事件数 / 计入 / 首次见到 / 最近见到 / 操作',
+      ['客户端', '事件数', '计入', '首次见到', '最近见到', '操作'].every((h) =>
+        (clientPanel?.headers ?? []).includes(h)
+      ),
+      JSON.stringify(clientPanel?.headers)
+    );
+    check(
+      '「见过的客户端」也不需要横向滚动',
+      clientPanel !== null && clientPanel.scrollWidth <= clientPanel.clientWidth + 4,
+      JSON.stringify({ scrollWidth: clientPanel?.scrollWidth, clientWidth: clientPanel?.clientWidth })
+    );
+    const ignoredRow = (clientPanel?.rows ?? []).find((cells) => (cells[0] ?? '').includes('regclient/'));
+    check(
+      '已被规则排掉的客户端显示成「已忽略」，不再给一个点了也没用的按钮',
+      !ignoredRow || ignoredRow.includes('已忽略'),
+      JSON.stringify(ignoredRow)
+    );
+    await evaluate(
+      `[...document.querySelectorAll('.stats-panel-title')]
+        .find((h) => h.innerText.includes('见过的客户端'))?.scrollIntoView({ block: 'center' })`
+    );
+    await sleep(400);
+    console.log('   截图:', await shot('layout-stats-clients'));
+
+    /*
      * 「忽略」入口必须在**那一行上**。
      *
-     * 这是这一轮的设计决定：要排掉某个客户端时，人正站在「最近事件」前面看着那条 UA，
+     * 这是这一轮的设计决定：要排掉某个客户端时，人正站在热度页前面看着那条 UA，
      * 「复制 UA → 去设置页 → 粘进表单 → 保存」是把人从问题现场赶到别处去。
      * 浏览器里点一遍才能确认按钮真的渲染出来了、弹框真的挂上了（Modal 是运行时创建的）。
+     *
+     * 入口在两处，优先找「见过的客户端」那一行：它是持久视图，客户端出现过就一定在，
+     * 不受 200 条事件窗口限制；「最近事件」那一行是补充（事件还在窗口里时能就地忽略）。
+     * 早先只找后者 —— 一旦窗口里的事件正好都已被规则命中，整段就 skip 掉，
+     * 连带把下面那条"没有副作用"的断言也让过去了。**断言被跳过等于没有断言**。
      */
+    // 先记下规则快照：验证脚本**不许改应用状态**，跑完必须一模一样。
+    const rulesBefore = await evaluate(
+      `fetch('/api/stats/ignore').then((r) => r.json()).then((j) => JSON.stringify(j.data))`
+    );
     const ignoreEntry = await evaluate(`(() => {
+      const panelTitle = [...document.querySelectorAll('.stats-panel-title')]
+        .find((h) => h.innerText.includes('见过的客户端'));
+      const clientRows = [...(panelTitle?.closest('.panel')?.querySelectorAll('tbody tr') ?? [])];
+      const clientRow = clientRows.find((tr) =>
+        [...tr.querySelectorAll('button')].some((b) => b.innerText.trim() === '忽略')
+      );
+      // 有几行"本来就该有按钮"：既不是本工具自己、也没有被规则排掉。
+      // 一行都没有时不给按钮是对的，这种情况下面的断言不成立、只能 skip。
+      const actionable = clientRows.filter((tr) => {
+        const action = tr.querySelector('td:last-child')?.innerText.trim() ?? '';
+        return action !== '本工具' && action !== '已忽略';
+      }).length;
       const header = [...document.querySelectorAll('.ant-collapse-header')]
         .find((h) => h.innerText.includes('最近事件'));
-      const item = header?.closest('.ant-collapse-item');
-      const btn = [...(item?.querySelectorAll('button') ?? [])]
+      const scope = clientRow ?? header?.closest('.ant-collapse-item');
+      const btn = [...(scope?.querySelectorAll('button') ?? [])]
         .find((b) => b.innerText.trim() === '忽略');
-      if (!btn) return { found: false };
+      if (!btn) return { found: false, actionable };
       btn.click();
-      return { found: true };
+      return { found: true, actionable, from: clientRow ? '客户端清单' : '最近事件' };
     })()`);
+    check(
+      '客户端清单里没被排掉的客户端，那一行上就有「忽略」按钮（持久视图，不受 200 条事件窗口限制）',
+      (ignoreEntry?.actionable ?? 0) === 0 || ignoreEntry?.from === '客户端清单',
+      JSON.stringify(ignoreEntry)
+    );
     await sleep(700);
     if (ignoreEntry.found) {
       const ignoreDialog = await evaluate(`(() => {
@@ -487,8 +565,25 @@ try {
       );
       await sleep(600);
       check(
-        '点「取消」后弹框关闭、什么也没加',
+        '点「取消」后弹框关闭',
         (await evaluate(`!document.querySelector('.ant-modal-content')`)) === true
+      );
+      /*
+       * 这条才是真正的"什么也没加"。
+       *
+       * 之前只断言"弹框没了"——**保存也会让弹框消失**，所以那条断言根本挡不住
+       * "验证脚本顺手往应用里写了一条规则"。真实发生过：跑完 verify:layout 之后，
+       * 开发库的规则表里多了一条 `docker/27.3.1`（弹框预填的那个片段），
+       * 之后所有 docker 事件都被它排掉了，排查时白绕一圈。
+       * 快照比对才能证明没副作用。
+       */
+      const rulesAfter = await evaluate(
+        `fetch('/api/stats/ignore').then((r) => r.json()).then((j) => JSON.stringify(j.data))`
+      );
+      check(
+        '点「取消」后规则一条都没变（验证脚本不许改应用状态）',
+        rulesBefore === rulesAfter,
+        JSON.stringify({ before: rulesBefore, after: rulesAfter })
       );
     } else {
       skip('「忽略」入口', '当前缓冲里没有可忽略的客户端（可能都被规则命中了）');

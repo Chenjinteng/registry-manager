@@ -351,6 +351,31 @@ export interface StatsEventItem {
   duplicate?: boolean;
 }
 
+/**
+ * 按客户端聚合的"见过的客户端"。
+ *
+ * 与「最近事件」是两种视图：那个是**逐条**的内存窗口（十几小时、重启就空），
+ * 这个是**按客户端**的持久聚合 —— 行数等于不同 UA 的数量，天然有界，
+ * 所以无论客户端来得多慢、中间重启过几次，"有没有我没见过的在打"都答得上来。
+ */
+export interface StatsClientItem {
+  useragent: string;
+  /** 第一次见到它（用来发现"新出现的客户端"）。 */
+  firstSeenAt: string;
+  lastSeenAt: string;
+  /** 收到的事件条数（含被规则排掉的）。 */
+  events: number;
+  /** 其中**计入热度**的条数；events 有值而它是 0 = 收到了但被排掉了。 */
+  counted: number;
+  /** 本工具自己（`registry-manager/*`）。 */
+  self: boolean;
+}
+
+export interface StatsClients {
+  days: number;
+  items: StatsClientItem[];
+}
+
 export interface StatsEvents {
   items: StatsEventItem[];
   totals: {
@@ -367,6 +392,14 @@ export interface StatsEvents {
      * "热度为什么变了"就查不出来了。
      */
     self: number;
+    /**
+     * 被折叠的"已命中忽略规则"的事件条数。
+     *
+     * 已被忽略的事件**不进 items** —— 200 条的窗口实测只覆盖最近十几小时，
+     * 而填满它的全是已经处理过的噪音，真正需要你瞄一眼的"还没分类的客户端"反而被挤掉。
+     * "收到过但被排掉了"由客户端清单回答（events 有、counted 为 0）。
+     */
+    ignored: number;
   };
 }
 

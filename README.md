@@ -116,7 +116,7 @@ docker compose up -d --build
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.8.1` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.9.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -127,7 +127,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.8.1 .
+docker build -t registry-manager:0.9.0 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -135,7 +135,7 @@ docker build -t registry-manager:0.8.1 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.8.1 .
+  -t registry-manager:0.9.0 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -146,7 +146,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.8.1 .
+  -t registry-manager:0.9.0 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -162,7 +162,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.8.1
+  registry-manager:0.9.0
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -188,8 +188,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.8.1 192.0.2.10:10001/example/registry-manager:0.8.1
-docker push 192.0.2.10:10001/example/registry-manager:0.8.1
+docker tag registry-manager:0.9.0 192.0.2.10:10001/example/registry-manager:0.9.0
+docker push 192.0.2.10:10001/example/registry-manager:0.9.0
 ```
 
 ### 镜像内置
@@ -614,6 +614,29 @@ notifications:
 它确实往本仓库写了一个 manifest，而"拉取次数"指的是**别人从这个 registry 拉走**。
 所以想看它，去热度页的「推送次数」KPI 或 Top 榜单的「推送」列 —— 不要在「拉取次数」里找。
 （`registry-manager/<版本>` 就是它的 User-Agent，能在「最近事件」里认出来。）
+
+### 见过的客户端（不用翻事件的排查入口）
+
+「最近事件」是**逐条**的，而且只在内存里 —— 实测 200 条只覆盖最近约 17 小时
+（regsync 一次扫全量 89 条、一天三次），**比这更慢的客户端你可能永远等不到看它一眼**，
+但热度每天都在被它污染。
+
+所以热度页上另有一块「**见过的客户端**」（按 User-Agent 聚合）：
+
+| 客户端 | 事件数 | 计入 | 首次见到 | 最近见到 | |
+| --- | --- | --- | --- | --- | --- |
+| `docker/27.3.1 …` | 12 | 12 | 3 周前 | 昨天 | 忽略 |
+| `regclient/regsync (v0.11.5)` | 8230 | 0 | 3 周前 | 2 小时前 | 已忽略 |
+| `registry-manager/0.9.0` | 178 | 0 | 3 周前 | 刚刚 | 本工具 |
+| `some-cron/1.0` | **7** | **7** | **2 天前** | 8 小时前 | **忽略** ← 一眼看到 |
+
+- **行数只跟"有多少个不同的客户端"有关**，与事件量无关 —— 全部 regsync 流量只占一行；
+- **落盘、重启不丢**，不靠那个内存窗口；
+- **「首次见到」让新出现的客户端自己冒出来**，「计入 N」直接说明它有没有在污染热度；
+- **「计入 0」= 收到过但被规则排掉了**；这一行根本不存在才是"没来过"。
+
+已命中忽略规则的客户端**不会再占「最近事件」的窗口**（面板标题上显示「已忽略折叠 N 条」）——
+那个窗口该留给你还没处理过的客户端。
 
 ### 已知边界
 

@@ -27,7 +27,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 /** 当前 schema 版本。加表/改列时 +1，并在 #migrate 里补迁移分支。 */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /** 单条 SQL 的忙等上限：并发写时宁可等一会，也不要直接抛 SQLITE_BUSY。 */
 const BUSY_TIMEOUT_MS = 5000;
@@ -132,6 +132,24 @@ export class Db {
         CREATE TABLE IF NOT EXISTS ignored_clients(
           useragent  TEXT PRIMARY KEY,
           created_at TEXT NOT NULL
+        ) WITHOUT ROWID;
+      `);
+    }
+
+    // v3 → v4：按客户端聚合的"见过的客户端"。
+    //
+    // 为什么不是把事件缓冲落盘：那是**逐条**的日志，随事件量增长、还要多一个保留期口径。
+    // 而"有没有我没见过的客户端在打"是个**按客户端聚合**的问题 ——
+    // 行数 = 不同 UA 的数量（现实里十几个），天然有界，全部 regsync 流量只占一行。
+    // 200 条的内存缓冲只覆盖最近十几小时，低速率的客户端根本等不到你看它一眼。
+    if (current < 4) {
+      this.#db.exec(`
+        CREATE TABLE IF NOT EXISTS client_seen(
+          useragent     TEXT PRIMARY KEY,
+          first_seen_at TEXT NOT NULL,
+          last_seen_at  TEXT NOT NULL,
+          events        INTEGER NOT NULL DEFAULT 0,
+          counted       INTEGER NOT NULL DEFAULT 0
         ) WITHOUT ROWID;
       `);
     }
@@ -408,9 +426,15 @@ export class Db {
     const dedup = this.#db
       .prepare('DELETE FROM event_seen WHERE seen_at < ?')
       .run(new Date(Date.now() - dedupDays * 86400_000).toISOString());
+    // 客户端清单**复用热度的保留期**，不新增配置旋钮：行数 = 不同 UA 的数量，
+    // 现实里十几个，本来就有界；按"最近见到"清掉长期不来的那些即可。
+    const clients = this.#db
+      .prepare('DELETE FROM client_seen WHERE last_seen_at < ?')
+      .run(new Date(Date.now() - retentionDays * 86400_000).toISOString());
     return {
       activity: Number(activity.changes ?? 0),
       dedup: Number(dedup.changes ?? 0),
+      clients: Number(clients.changes ?? 0),
     };
   }
 
@@ -436,12 +460,62 @@ export class Db {
     try {
       const activity = this.#db.prepare('DELETE FROM activity_daily').run();
       const seen = this.#db.prepare('DELETE FROM event_seen').run();
+      /*
+       * 客户端清单也一起清：它的 `counted` 列和热度是同一批事件的两种数法，
+       * 清了热度却留着它，界面上就会出现"这个客户端计入了 7 次"而热度是 0 的矛盾。
+       * 清空后它会在几小时内被 regsync / 真人重新填回来。
+       */
+      const clients = this.#db.prepare('DELETE FROM client_seen').run();
       this.#db.exec('COMMIT');
-      return { activity: Number(activity.changes ?? 0), seen: Number(seen.changes ?? 0) };
+      return {
+        activity: Number(activity.changes ?? 0),
+        seen: Number(seen.changes ?? 0),
+        clients: Number(clients.changes ?? 0),
+      };
     } catch (error) {
       this.#db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /*
+   * ── 按客户端聚合的"见过的客户端" ──
+   *
+   * 每收到一条事件就 UPSERT 一次：`events` 是收到的条数，`counted` 是其中计入了热度的条数。
+   * 于是"收到但被规则排掉了"（events 有、counted 为 0）和"根本没到"（这一行不存在）
+   * 一眼分得清 —— 这也是敢把"已忽略的事件"从内存缓冲里折叠掉的前提。
+   */
+
+  recordClient({ useragent, at, counted }) {
+    this.#db
+      .prepare(
+        `INSERT INTO client_seen(useragent, first_seen_at, last_seen_at, events, counted)
+         VALUES (?, ?, ?, 1, ?)
+         ON CONFLICT(useragent) DO UPDATE SET
+           last_seen_at = MAX(last_seen_at, excluded.last_seen_at),
+           events       = events + 1,
+           counted      = counted + excluded.counted`
+      )
+      .run(String(useragent), at, at, counted ? 1 : 0);
+  }
+
+  /** 最近 `days` 天见过的客户端，新的在前。`days` 为 0 表示不限。 */
+  listClients({ days = 0 }) {
+    const rows =
+      days > 0
+        ? this.#db
+            .prepare(
+              `SELECT * FROM client_seen WHERE last_seen_at >= ? ORDER BY last_seen_at DESC`
+            )
+            .all(new Date(Date.now() - days * 86400_000).toISOString())
+        : this.#db.prepare('SELECT * FROM client_seen ORDER BY last_seen_at DESC').all();
+    return rows.map((r) => ({
+      useragent: String(r.useragent),
+      firstSeenAt: String(r.first_seen_at),
+      lastSeenAt: String(r.last_seen_at),
+      events: Number(r.events),
+      counted: Number(r.counted),
+    }));
   }
 
   /*

@@ -323,7 +323,8 @@ PORT=8787 pnpm start
                 可以把它清空、从现在重新累计。
               </div>
               <div style={{ marginTop: 4, color: 'var(--color-text-3)' }}>
-                只清除热度聚合与幂等去重记录，<strong>拉取历史不受影响</strong>。此操作不可撤销。
+                会清除热度聚合、幂等去重记录与「见过的客户端」清单（后者的计入数与热度同源，
+                留着会自相矛盾），<strong>拉取历史不受影响</strong>。此操作不可撤销。
               </div>
               <Button
                 danger
@@ -335,7 +336,7 @@ PORT=8787 pnpm start
                   modal.confirm({
                     title: '清空全部热度数据？',
                     content:
-                      '已统计的热度会全部归零，从现在重新累计。拉取历史不受影响。此操作不可撤销。',
+                      '已统计的热度会全部归零，从现在重新累计。「见过的客户端」清单也会一起清掉（它会在几小时内被重新填回来）。拉取历史不受影响。此操作不可撤销。',
                     okText: '清空',
                     okButtonProps: { danger: true },
                     cancelText: '取消',

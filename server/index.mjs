@@ -905,7 +905,9 @@ app.get('/api/stats/events', (req, res) => {
   ok(res, {
     data: {
       items: activityStore ? activityStore.recentEvents(limit) : [],
-      totals: activityStore ? activityStore.totals() : { accepted: 0, rejected: 0, buffered: 0, self: 0 },
+      totals: activityStore
+        ? activityStore.totals()
+        : { accepted: 0, rejected: 0, buffered: 0, self: 0, ignored: 0 },
     },
   });
 });
@@ -929,7 +931,7 @@ app.delete('/api/stats/heat', (req, res) => {
     const removed = activityStore.purge();
     ok(res, {
       data: removed,
-      message: `已清空热度数据（${removed.activity} 行按天聚合、${removed.seen} 条去重记录），从现在重新累计`,
+      message: `已清空热度数据（${removed.activity} 行按天聚合、${removed.seen} 条去重记录、${removed.clients} 个客户端记录），从现在重新累计`,
     });
   } catch (error) {
     fail(res, error);
@@ -955,6 +957,18 @@ function readIgnoreRule(body) {
   }
   return { rule: raw };
 }
+
+/**
+ * 见过的客户端（按 User-Agent 聚合）。
+ *
+ * 与「最近事件」的区别：那个是**逐条**的内存窗口（实测只覆盖最近十几小时，
+ * 重启就空），这个是**按客户端**的持久聚合 —— 行数等于不同 UA 的数量，
+ * 所以无论客户端来得多慢、中间重启过几次，"有没有我没见过的在打"都答得上来。
+ */
+app.get('/api/stats/clients', (req, res) => {
+  const days = readInt(req.query.days, 30, 0, 3650);
+  ok(res, { data: { days, items: activityStore ? activityStore.clients(days) : [] } });
+});
 
 /** 当前生效的忽略规则，按来源分开。界面据此标出"哪条来自环境变量、删不掉"。 */
 app.get('/api/stats/ignore', (req, res) => {

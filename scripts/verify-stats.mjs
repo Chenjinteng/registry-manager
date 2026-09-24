@@ -479,7 +479,8 @@ store.close();
   check('清空后热度归零', purgeStore.summary(30).total === 0, String(purgeStore.summary(30).total));
   check(
     '清空后累计计数与内存缓冲一起归零（否则面板还挂着旧事件，看着像没清成功）',
-    JSON.stringify(purgeStore.totals()) === JSON.stringify({ accepted: 0, rejected: 0, buffered: 0, self: 0 }),
+    JSON.stringify(purgeStore.totals()) ===
+      JSON.stringify({ accepted: 0, rejected: 0, buffered: 0, self: 0, ignored: 0 }),
     JSON.stringify(purgeStore.totals())
   );
 
@@ -507,14 +508,33 @@ store.close();
     ignoreStore.summary(30).total === 1,
     JSON.stringify(ignoreStore.summary(30))
   );
-  const ignoredRow = ignoreStore.recentEvents(10).find((e) => e.reason?.startsWith('IGNORED_USERAGENT'));
+  /*
+   * 设计变更：已被规则命中的事件**不再占排查缓冲**（0.9.0）。
+   *
+   * 理由：那个 200 条的窗口实测只覆盖最近十几小时（regsync 一次扫全量就是 89 条、
+   * 一天 3 次），而它填进去的全是**已经处理过**的噪音，真正需要你瞄一眼的
+   * "还没分类的客户端"反而被挤掉了。窗口该留给没处理的那些。
+   *
+   * 代价是"被排掉了"和"事件根本没到"不能再靠缓冲区分 —— 所以这个区分**改由
+   * 客户端清单承担**：`events` 有值而 `counted` 为 0 = 收到了但被排掉；
+   * 这一行根本不存在 = 事件真的没到。下面两条断言就是钉住这个替代关系，
+   * **不能只把老断言删掉**，否则区分能力就真的丢了。
+   */
   check(
-    '被忽略的事件仍然留在排查缓冲里（否则"被排掉了"和"事件根本没到"分不清）',
-    Boolean(ignoredRow) &&
-      ignoredRow.counted === false &&
-      ignoredRow.repository === 'busybox' &&
-      ignoredRow.useragent.startsWith('regclient/'),
-    JSON.stringify(ignoredRow && { reason: ignoredRow.reason, repository: ignoredRow.repository })
+    '已被忽略的事件不再占排查缓冲（窗口留给"还没处理过"的客户端）',
+    !ignoreStore.recentEvents(50).some((e) => e.reason?.startsWith('IGNORED_USERAGENT')),
+    JSON.stringify(ignoreStore.recentEvents(50).map((e) => e.reason))
+  );
+  const ignoredClient = ignoreStore.clients(30).find((c) => c.useragent.startsWith('regclient/'));
+  check(
+    '但客户端清单记得"收到过 N 条、计入 0 条" —— 用它区分"被排掉"和"没到"',
+    ignoredClient?.events >= 1 && ignoredClient?.counted === 0,
+    JSON.stringify(ignoredClient)
+  );
+  check(
+    '面板计数也把折叠掉的算到 ignored 里（数字仍与表里的行数对得上）',
+    ignoreStore.totals().ignored >= 1 && ignoreStore.totals().rejected === 0,
+    JSON.stringify(ignoreStore.totals())
   );
   ignoreStore.close();
 
@@ -677,11 +697,29 @@ store.close();
       afterSync?.data?.total === 1,
       JSON.stringify(afterSync?.data)
     );
-    const ignoredEntry = (await (await fetch(`${base}/api/stats/events?limit=10`)).json())?.data?.items?.[0];
+    const eventsAfterSync = (await (await fetch(`${base}/api/stats/events?limit=50`)).json())?.data;
     check(
-      '被忽略的事件仍在「最近事件」里，reason 写着 IGNORED_USERAGENT',
-      ignoredEntry?.counted === false && ignoredEntry?.reason === 'IGNORED_USERAGENT:regclient/regsync',
-      JSON.stringify({ reason: ignoredEntry?.reason, counted: ignoredEntry?.counted })
+      '已被忽略的事件不再列在「最近事件」里（窗口留给没处理的）',
+      !(eventsAfterSync?.items ?? []).some((e) => e.reason?.startsWith('IGNORED_USERAGENT')),
+      JSON.stringify((eventsAfterSync?.items ?? []).map((e) => e.reason))
+    );
+    check(
+      '折叠条数单独回显（totals.ignored），排查时知道"确实收到过、被规则排掉了"',
+      eventsAfterSync?.totals?.ignored >= 1,
+      JSON.stringify(eventsAfterSync?.totals)
+    );
+    const clientsRes = await (await fetch(`${base}/api/stats/clients?days=30`)).json();
+    const syncClient = (clientsRes?.data?.items ?? []).find((c) => c.useragent.includes('regclient/regsync'));
+    check(
+      '客户端清单里能看到它：收到过、计入 0（这就是"被排掉"的证据）',
+      syncClient?.events >= 1 && syncClient?.counted === 0,
+      JSON.stringify(syncClient)
+    );
+    check(
+      '客户端清单区分得出"谁在打"：同步工具与真人都各有自己的一行',
+      (clientsRes?.data?.items ?? []).some((c) => c.useragent.startsWith('regclient/')) &&
+        (clientsRes?.data?.items ?? []).some((c) => c.useragent.startsWith('regclient/v0.8.0')),
+      JSON.stringify((clientsRes?.data?.items ?? []).map((c) => `${c.useragent.slice(0, 18)}:${c.events}/${c.counted}`))
     );
 
     /*
@@ -1042,6 +1080,103 @@ store.close();
   );
   reopenedRules.close();
   rmSync(ruleDir, { recursive: true, force: true });
+}
+
+// ───────────────────── 十四、按客户端聚合的"见过的客户端" ─────────────────────
+//
+// 起因是个真实顾虑："200 条缓冲里如果有个未知 UA 在刷，我可能没及时看到就被它污染了。"
+//
+// 这个顾虑成立，而且比看起来更紧：regsync 一次扫全量就是 89 条、一天 3 次
+// → 200 条的窗口只覆盖**最近十几小时**。比这更慢的客户端（比如一天一次的定时任务）
+// 永远等不到你看它一眼 —— 但热度每天都在被它污染。
+//
+// 根因不是窗口太小，而是**用"逐条事件"回答一个"按客户端聚合"的问题**。
+// 所以加一张 client_seen：行数 = 不同 UA 的数量（现实里十几个），天然有界，全部
+// regsync 流量只占一行；落 SQLite，重启不丢。
+{
+  const aggDir = mkdtempSync(join(tmpdir(), 'registry-manager-clients-'));
+  const aggFile = join(aggDir, 'registry-manager.db');
+  const aggDb = new Db({ filePath: aggFile });
+
+  // 直接调持久层，好控制时间戳（store 的 base.at 是服务端取 now，测不出先后）。
+  const old = new Date(Date.now() - 5 * 86400_000).toISOString();
+  const recent = new Date(Date.now() - 1 * 86400_000).toISOString();
+  aggDb.recordClient({ useragent: 'cron/1.0', at: old, counted: true });
+  aggDb.recordClient({ useragent: 'cron/1.0', at: recent, counted: false });
+
+  const rows = aggDb.listClients({ days: 0 });
+  const cron = rows.find((r) => r.useragent === 'cron/1.0');
+  check(
+    '同一个客户端只占一行：events 累加、counted 只累加计入的',
+    rows.length === 1 && cron.events === 2 && cron.counted === 1,
+    JSON.stringify(cron)
+  );
+  check(
+    'first_seen_at 保留第一次、last_seen_at 取最新（"首次见到"是发现新客户端的关键）',
+    cron.firstSeenAt === old && cron.lastSeenAt === recent,
+    JSON.stringify({ first: cron.firstSeenAt, last: cron.lastSeenAt })
+  );
+  check(
+    'days 过滤按 last_seen_at 算（用相对时间，不依赖运行日期）',
+    aggDb.listClients({ days: 3 }).length === 1 && aggDb.listClients({ days: 10 }).length === 1,
+    JSON.stringify(aggDb.listClients({ days: 3 }).length)
+  );
+
+  /*
+   * 每个收到的事件都要记账 —— 包括**被忽略的**、**自身发的**、以及**缺 id 被丢掉的**。
+   * 少记任何一类，"没出现过"和"出现过但被处理掉了"就又分不清了。
+   */
+  const aggStore = new ActivityStore({
+    db: aggDb,
+    retentionDays: 90,
+    ignoreUseragents: ['regclient/regsync'],
+  });
+  const ignored = manifestEvent({ repository: 'x', action: 'pull', method: 'HEAD', tag: 'v1' });
+  ignored.request.useragent = 'regclient/regsync (v0.11.5)';
+  const selfRead = manifestEvent({ repository: 'x', action: 'pull', method: 'GET', tag: 'v1' });
+  selfRead.request.useragent = `${SELF_USERAGENT_PREFIX}0.9.0`;
+  const noId = manifestEvent({ repository: 'x', action: 'pull', method: 'HEAD', tag: 'v1' });
+  noId.request.useragent = 'weird-client/1.0';
+  noId.id = undefined;
+  aggStore.ingest({ events: [ignored, selfRead, noId] });
+
+  const byUa = Object.fromEntries(aggStore.clients(0).map((c) => [c.useragent, c]));
+  check(
+    '被规则忽略的客户端也在清单里（events 有、counted 为 0 = 收到过但被排掉）',
+    byUa['regclient/regsync (v0.11.5)']?.events === 1 && byUa['regclient/regsync (v0.11.5)']?.counted === 0,
+    JSON.stringify(byUa['regclient/regsync (v0.11.5)'])
+  );
+  check(
+    '自身请求也在清单里，并且被标成 self（界面据此区分"自己人"）',
+    byUa[`${SELF_USERAGENT_PREFIX}0.9.0`]?.self === true &&
+      byUa[`${SELF_USERAGENT_PREFIX}0.9.0`]?.counted === 0,
+    JSON.stringify(byUa[`${SELF_USERAGENT_PREFIX}0.9.0`])
+  );
+  check(
+    '缺 event.id 被丢弃的事件照样记账（否则它会成为"看不见的客户端"）',
+    byUa['weird-client/1.0']?.events === 1,
+    JSON.stringify(byUa['weird-client/1.0'])
+  );
+
+  aggStore.close();
+
+  // 清单是落库的：重启后还在（这正是不靠 200 条内存缓冲的意义）。
+  const reopened = new Db({ filePath: aggFile });
+  check(
+    '客户端清单落 SQLite，重启后还在',
+    reopened.listClients({ days: 0 }).some((r) => r.useragent === 'weird-client/1.0'),
+    JSON.stringify(reopened.listClients({ days: 0 }).map((r) => r.useragent))
+  );
+  // 清空热度时它一起清：它的 counted 列和热度同源，清了热度却留着它会自相矛盾。
+  const purged = reopened.purgeHeat();
+  // 4 行：直接调持久层写的 cron/1.0，加上经 store 进来的那 3 个客户端。
+  check(
+    '清空热度会连客户端清单一并清掉（counted 与热度同源，留着会自相矛盾）',
+    purged.clients === 4 && reopened.listClients({ days: 0 }).length === 0,
+    JSON.stringify(purged)
+  );
+  reopened.close();
+  rmSync(aggDir, { recursive: true, force: true });
 }
 
 rmSync(dir, { recursive: true, force: true });

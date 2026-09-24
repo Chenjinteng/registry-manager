@@ -208,8 +208,10 @@ export class ActivityStore {
   #ignoreUseragents;
   #accepted = 0;
   #rejected = 0;
-  /** 本工具自己发的请求条数（不进缓冲，见 SELF_USERAGENT_PREFIX）。 */
+  /** 被折叠的自身请求条数（盘点那一百多条读请求，见 SELF_USERAGENT_PREFIX）。 */
   #self = 0;
+  /** 被折叠的"已命中规则"的事件条数；它们已经不计入热度，面板窗口留给没处理过的。 */
+  #ignored = 0;
 
   /**
    * @param {object} opts
@@ -341,11 +343,30 @@ export class ActivityStore {
        * `result.*` 是这次接收的真实账，与折叠无关，照常统计。
        */
       const self = base.useragent.startsWith(SELF_USERAGENT_PREFIX);
-      const folded = self && !verdict.counted;
+      /*
+       * 折叠（不进排查缓冲）的两种：
+       *   1. **已被规则忽略**的客户端 —— 规则在生效，面板的窗口该留给"还没处理过"的；
+       *      "收到但被排掉了"由客户端清单回答（events 有、counted 为 0）。
+       *   2. **自身请求里不计入的那些** —— 盘点的读请求，一次上百条。
+       */
+      const ignoredByRule = verdict.reason.startsWith('IGNORED_USERAGENT:');
+      const foldedSelf = self && !ignoredByRule && !verdict.counted;
+      const folded = ignoredByRule || foldedSelf;
+
+      /*
+       * **每一条都记账**，包括被忽略的、自身发的、以及后面会被丢弃的。
+       * 这张表回答的是"有没有我没见过的客户端在打" —— 它必须覆盖全部收到的事件，
+       * 否则"没出现过"和"出现过但被排掉了"又分不清了。
+       */
+      if (base.useragent) {
+        this.#db.recordClient({ useragent: base.useragent, at: base.at, counted: verdict.counted });
+      }
 
       if (!verdict.counted) {
         result.skipped += 1;
-        if (folded) {
+        if (ignoredByRule) {
+          this.#ignored += 1;
+        } else if (foldedSelf) {
           this.#self += 1;
         } else {
           this.#rejected += 1;
@@ -356,7 +377,9 @@ export class ActivityStore {
       if (!base.id) {
         // 没有 id 就无法幂等，宁可丢弃也不冒重复计数的风险。
         result.skipped += 1;
-        if (folded) {
+        if (ignoredByRule) {
+          this.#ignored += 1;
+        } else if (foldedSelf) {
           this.#self += 1;
         } else {
           this.#rejected += 1;
@@ -418,6 +441,8 @@ export class ActivityStore {
       buffered: this.#buffer.length,
       /** 被折叠的自身请求条数（不计入的那些，主要是盘点的读请求）；不在 accepted / rejected 里，也不在缓冲里。 */
       self: this.#self,
+      /** 被折叠的"已命中忽略规则"的事件条数；同样不在 accepted / rejected 里。 */
+      ignored: this.#ignored,
     };
   }
 
@@ -435,6 +460,14 @@ export class ActivityStore {
 
   forRepositories(days) {
     return this.#db.forRepositories(days);
+  }
+
+  /** 见过的客户端（按 UA 聚合）。`self` 标出本工具自己，界面可以据此提示。 */
+  clients(days) {
+    return this.#db.listClients({ days }).map((row) => ({
+      ...row,
+      self: row.useragent.startsWith(SELF_USERAGENT_PREFIX),
+    }));
   }
 
   earliestDay() {
@@ -463,6 +496,7 @@ export class ActivityStore {
     this.#accepted = 0;
     this.#rejected = 0;
     this.#self = 0;
+    this.#ignored = 0;
     return removed;
   }
 
