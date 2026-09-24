@@ -708,26 +708,67 @@ store.close();
 //
 // 178 这个数也精确对得上：76 仓库 / 88 tag 的一次「重新扫描」= 88 次 manifest GET
 // + 88 次 image config blob GET ≈ 178 条事件 —— 正好把 200 条的排查缓冲冲干净。
+//
+// **这一节必须把所有出站路径都跑到**：`registry-client.mjs` 里除了走 `#request` 的常规请求，
+// 还有两条**直接用 undiciFetch** 的写路径（上传会话的 PATCH、目的端落 manifest 的 PUT）。
+// 它们最容易漏 —— 只在 `#request` 里加 UA 的话，用一次「镜像拉取」就会在 registry 侧
+// 又冒出认不出来的 `undici`，而且不会被算进"自身请求"。
 {
   const seen = [];
   const server = createServer((req, res) => {
-    seen.push({ url: req.url, ua: req.headers['user-agent'] ?? '' });
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ repositories: [] }));
+    seen.push({ method: req.method, url: req.url, ua: req.headers['user-agent'] ?? '' });
+    req.resume();
+    req.on('end', () => {
+      if (req.method === 'PUT') {
+        res.writeHead(201, { 'Content-Type': 'application/json', 'Docker-Content-Digest': 'sha256:x' });
+        res.end('{}');
+        return;
+      }
+      if (req.method === 'PATCH') {
+        res.writeHead(202, { Location: '/v2/x/blobs/uploads/1' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ repositories: [] }));
+    });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
   try {
-    const probeClient = new RegistryClient({ url: `http://127.0.0.1:${port}` });
+    const probeClient = new RegistryClient({ url: base });
+    // 常规读路径（走 #request）
     await probeClient.listRepositories();
+    // 拉取写目的端的两条（直接用 undiciFetch，不走 #request）
+    await probeClient.putDestManifest('x', 'v1', Buffer.from('{}'), 'application/vnd.oci.image.manifest.v1+json');
+    await probeClient.streamBlobToDest({
+      location: `${base}/v2/x/blobs/uploads/1`,
+      source: {
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('hello'));
+            controller.close();
+          },
+        }),
+      },
+    });
   } finally {
     server.close();
   }
 
+  const paths = [...new Set(seen.map((r) => `${r.method} ${r.url?.split('?')[0]}`))];
   check(
-    '本工具的请求带上自己的 User-Agent（不再是裸的 `undici`）',
+    '三条出站路径都真的跑到了（读 / 上传 PATCH / 落 manifest PUT）',
+    seen.some((r) => r.method === 'GET') &&
+      seen.some((r) => r.method === 'PATCH') &&
+      seen.some((r) => r.method === 'PUT'),
+    JSON.stringify(paths)
+  );
+  check(
+    '本工具的请求带上自己的 User-Agent（不再是裸的 `undici`）—— 含拉取写目的端那两条',
     seen.length > 0 && seen.every((r) => r.ua === USER_AGENT),
-    JSON.stringify(seen.slice(0, 2))
+    JSON.stringify(seen.map((r) => `${r.method} ${r.ua}`))
   );
   check(
     'UA 形如 registry-manager/<版本>，且与接收端认定的"自身请求"前缀一致',

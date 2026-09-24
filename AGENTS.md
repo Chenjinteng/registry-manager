@@ -200,6 +200,10 @@ SQL 全部集中在 `server/db.mjs`（类名就叫 `Db`）。**不要**因此往
   正好把 200 条的排查缓冲冲干净。所以：
   - `registry-client.mjs` 的每次请求都带 `User-Agent: registry-manager/<版本>`
     （`USER_AGENT` 常量）。**不要删** —— 删了就退回"认不出来"的状态。
+    ⚠️ **出站路径有三条，别只改 `#request`**：还有两条直接用 `undiciFetch` 的写路径
+    （`streamBlobToDest` 的上传会话 PATCH、`putDestManifest` 的目的端 PUT）。
+    0.7.1 就漏了这两条 —— 只要用一次「镜像拉取」就会在 registry 侧又冒出 `undici`，
+    而且不会被算进"自身请求"。`verify:stats` 里那条断言把三条都跑到了。
   - 接收端按 `SELF_USERAGENT_PREFIX` 认定自身请求：**不进排查缓冲、不计入面板的
     计入/未计入**，只累加 `totals().self` 并在面板上显示条数。
   - **计数语义不受影响**：自身请求照常走 `classifyEvent`。盘点读 GET manifest 与 blob

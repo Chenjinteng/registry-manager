@@ -879,7 +879,7 @@ export class RegistryClient {
         }
       }
 
-      const headers = { 'Content-Type': 'application/octet-stream' };
+      const headers = { 'Content-Type': 'application/octet-stream', 'User-Agent': USER_AGENT };
       if (contentLength && Number.isFinite(contentLength)) {
         headers['Content-Length'] = String(contentLength);
       }
@@ -1009,7 +1009,7 @@ export class RegistryClient {
       }
     }
     try {
-      const headers = { 'Content-Type': contentType };
+      const headers = { 'Content-Type': contentType, 'User-Agent': USER_AGENT };
       const manifestScope = scopeForPath(`/v2/${destRepo}/manifests/${tag}`, 'PUT');
       const manifestToken = manifestScope ? this.tokenCache.get(manifestScope)?.token : undefined;
       if (manifestToken) {
