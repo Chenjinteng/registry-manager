@@ -461,9 +461,11 @@
   color: var(--color-text-3);
 }
 
-.heatmap-swatch {
-  display: inline-block;
-  border-radius: 2px;
+/* 图例色块是 SVG rect（见 contribution-heatmap.tsx），复用 .heatmap-cell 那套档位色。
+   ⚠️ 不要改回 `<span>` + background：那会变成第二份色板，改了档位就得改两处。 */
+.heatmap-legend-swatches {
+  display: block;
+  overflow: visible;
 }
 
 .stats-panel-head {

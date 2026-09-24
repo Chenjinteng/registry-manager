@@ -314,6 +314,50 @@ try {
       `document.querySelector('.heatmap-caption')?.scrollIntoView({ block: 'center' })`
     );
     await sleep(400);
+    /*
+     * 图例：少 [5 个档位色块] 多。
+     *
+     * 这里踩过一次：色块原本是 HTML `<span>` 套 `.heatmap-cell--l*`，而那套规则只写
+     * `fill` / `fill-opacity` —— **fill 对 HTML 元素无效**，于是 5 个色块全透明，
+     * 屏幕上只剩"少 …… 多"两个字。type-check、build 都不报错，读代码也像是对的，
+     * 只有真去读 computed style 才看得出来。
+     */
+    const legend = await evaluate(`(() => {
+      const box = document.querySelector('.heatmap-legend');
+      if (!box) return null;
+      return {
+        labels: [...box.querySelectorAll('span')].map((s) => s.innerText.trim()),
+        swatches: [...box.querySelectorAll('rect')].map((r) => {
+          const cs = getComputedStyle(r);
+          const rect = r.getBoundingClientRect();
+          return {
+            w: Math.round(rect.width),
+            h: Math.round(rect.height),
+            fill: cs.fill,
+            alpha: Number(cs.fillOpacity),
+          };
+        }),
+      };
+    })()`);
+    check(
+      '图例有「少 / 多」两个端点（说明色块是干什么的）',
+      legend?.labels?.includes('少') === true && legend?.labels?.includes('多') === true,
+      JSON.stringify(legend?.labels)
+    );
+    check(
+      '图例的 5 个色块真的画出来了 —— 有面积、有颜色、不透明',
+      legend?.swatches?.length === 5 &&
+        legend.swatches.every(
+          (s) => s.w > 0 && s.h > 0 && s.fill !== 'none' && !/rgba?\\(0, 0, 0, 0\\)/.test(s.fill) && s.alpha > 0
+        ),
+      JSON.stringify(legend?.swatches)
+    );
+    check(
+      '档位由浅到深单调递增（第 0 档是中性灰，只看 1~4 档）',
+      (legend?.swatches?.length ?? 0) === 5 &&
+        legend.swatches.slice(2).every((s, i) => s.alpha > legend.swatches[i + 1].alpha),
+      JSON.stringify(legend?.swatches?.map((s) => s.alpha))
+    );
     console.log('   截图:', await shot('layout-stats-heatmap'));
 
     // 日历是固定跨度：切时间窗不该改变它（KPI 与榜单才跟时间窗走）。

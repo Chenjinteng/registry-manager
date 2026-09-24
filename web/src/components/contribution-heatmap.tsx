@@ -136,15 +136,33 @@ export default function ContributionHeatmap({
         ))}
       </svg>
 
+      {/*
+        图例必须用**真的 SVG rect**，不能拿 `<span>` 套那几个 class。
+        档位色是靠 `fill` / `fill-opacity` 表达的，而 **`fill` 对 HTML 元素没有任何效果** ——
+        span 版图例是 5 个全透明方块，屏幕上只剩"少 …… 多"两个字，
+        type-check、build、截图断言都不会报错。用 rect 还顺带保证图例与日历
+        **同一套 class、同一个真相来源**，不会改了一处忘了另一处。
+      */}
       <div className="heatmap-legend">
         <span>少</span>
-        {[0, 1, 2, 3, 4].map((level) => (
-          <span
-            key={level}
-            className={`heatmap-swatch heatmap-cell--l${level}`}
-            style={{ width: cell, height: cell }}
-          />
-        ))}
+        <svg
+          className="heatmap-legend-swatches"
+          width={5 * cell + 4 * HEATMAP_GAP}
+          height={cell}
+          aria-hidden="true"
+        >
+          {[0, 1, 2, 3, 4].map((level) => (
+            <rect
+              key={level}
+              className={`heatmap-cell heatmap-cell--l${level}`}
+              x={level * (cell + HEATMAP_GAP)}
+              y={0}
+              width={cell}
+              height={cell}
+              rx={2}
+            />
+          ))}
+        </svg>
         <span>多</span>
       </div>
     </div>
