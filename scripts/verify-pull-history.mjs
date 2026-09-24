@@ -178,6 +178,18 @@ const terminalJob = (over = {}) => ({
   // 热度的 cleanup 也不该顺手把拉取历史删了
   db.cleanup({ retentionDays: 90, dedupDays: 7 });
   check('热度的 cleanup 不碰拉取历史', db.getPullJob('fresh') !== null);
+
+  /*
+   * 「清空热度、从头重计」也不该碰拉取历史。
+   *
+   * 这条边界容易写错：purgeHeat 和 cleanupPullJobs 都长得像"清数据"，顺手一起清掉
+   * 就变成"口径改一次，任务记录一起没"—— 那是两件不同的事，保留期也是分开配的。
+   */
+  const purged = db.purgeHeat();
+  check('清空热度确实清掉了聚合行', purged.activity === 1, JSON.stringify(purged));
+  check('清空热度后热度归零', db.summary({ days: 3650 }).total === 0, String(db.summary({ days: 3650 }).total));
+  check('清空热度**不碰拉取历史**', db.getPullJob('fresh') !== null, JSON.stringify(db.listPullJobs().map((j) => j.id)));
+
   db.close();
 }
 

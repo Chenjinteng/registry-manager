@@ -162,6 +162,26 @@ SQL 全部集中在 `server/db.mjs`（类名就叫 `Db`）。**不要**因此往
   → **必须按 `event.id` 幂等**（去重与计数放在同一个事务里），否则重复累加。
 - 一个信封**可以包含多条事件**（实测每条 1 条），接收端必须按数组处理。
 - **`action == "pull"` 的过滤不能替代 `method` 过滤**：两者必须同时在。
+- **registry 侧只能按 action 与 media type 过滤**：`notifications` 的过滤项只有
+  `ignore.mediatypes` 与 `ignore.actions`（旧写法 `ignoredmediatypes`），
+  **没有按客户端 / 仓库 / User-Agent 过滤的入口**。所以"排掉某个自动化进程"只能在我们
+  这一侧做，别去改 registry 的配置（改它还要重启 registry，重启会丢掉未发送的事件队列）。
+- **排除自动化流量（regsync / skopeo 之类按点扫全量）时，只有 `request.useragent` 可靠**：
+
+  | 字段 | 可用性 |
+  | --- | --- |
+  | `request.useragent` | **可靠**。docker CLI 是 `docker/27.x ... UpstreamClient(...)`，同步工具带自己的 UA（`regclient/...` / `skopeo/...`） |
+  | `request.addr` | 端口映射下是 Docker 网桥地址（如 `172.19.0.1`），**所有人都是它**，区分不了任何东西 |
+  | `request.host` | 内网里所有客户端用的 Host 头通常一致 |
+  | `actor.name` | 只有 registry 开了认证**且**该工具用独立账号时才有值；未开认证时是 `{}` |
+
+  这四个字段现在都存进内存里的排查缓冲（并做长度截断 —— 外部输入不能无界撑大内存），
+  所以「最近事件」面板能直接看出是谁在打。
+- 症状识别：自动化进程会把**每个 tag 的热度刷成同一个数**，且所有仓库的"最近活动"是
+  同一个时刻。看到这种整齐度就别再怀疑是人了。
+- **清空热度（`purgeHeat`）刻意不碰 `pull_jobs`**：拉取历史是任务记录，不是统计口径的
+  产物，两者保留期也是分开配的。同理 `cleanupPullJobs` 不碰 `activity_daily` ——
+  **这两条边界都有断言钉住**，别顺手合并成一个 `clear()`。
 
 ## 破坏性操作红线
 
@@ -302,9 +322,14 @@ Location / 上传会话各一套），用真实代码路径跑完整流程。**�
 挡不住回归。
 
 `scripts/verify-stats.mjs`（`pnpm verify:stats`）专门钉**热度口径**：blob 事件不计入、
-pull 的内容下载（GET）不计入、push 时的 blob 探测不计入、同一个 `event.id` 只计一次。
+pull 的内容下载（GET）不计入、push 时的 blob 探测不计入、同一个 `event.id` 只计一次；
+另外钉**排查用的身份字段**（`useragent` / `addr` / `host` / `actor` 有没有真的存下来、
+超长输入有没有被截断）与**清空热度**（聚合与去重窗口一起清、清完同一个 id 能重新计入、
+累计计数与内存缓冲一起归零、HTTP 层能读能清）。
 **改动 `server/events.mjs` 的过滤判据时必须同时跑它**，并按上面的规矩确认回退后会失败
-（已验证：去掉 method 判据会有 6 项失败、去掉 mediaType 判据会有 5 项失败）。
+（已验证：去掉 method 判据会有 6 项失败、去掉 mediaType 判据会有 5 项失败；
+去掉身份字段会有 4 项失败、`purgeHeat` 漏删去重窗口会有 2 项失败、
+`purge` 不清内存缓冲会有 1 项失败、删掉 `DELETE /api/stats/heat` 会有 2 项失败）。
 
 `scripts/verify-pull-history.mjs`（`pnpm verify:pull-history`）钉**拉取历史的存储契约**：
 **老库（user_version=1，只有热度）升级到 v2 不丢数据**、queued/running 不落库、

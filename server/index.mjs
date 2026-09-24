@@ -897,6 +897,32 @@ app.get('/api/stats/events', (req, res) => {
   });
 });
 
+/**
+ * 清空**全部热度数据**（不按保留期）。
+ *
+ * 用途是"口径改正后从头重计"：热度一旦被某个自动化进程刷高，修正过滤只对以后生效，
+ * 已经聚合进 `activity_daily` 的行追溯不出来，只能清掉重新累计。
+ * **不碰拉取历史** —— 那是任务记录，不是统计口径的产物。
+ */
+app.delete('/api/stats/heat', (req, res) => {
+  if (!activityStore) {
+    fail(
+      res,
+      new RegistryError('热度统计未启用，没有可清空的数据。', 'STATS_DISABLED')
+    );
+    return;
+  }
+  try {
+    const removed = activityStore.purge();
+    ok(res, {
+      data: removed,
+      message: `已清空热度数据（${removed.activity} 行按天聚合、${removed.seen} 条去重记录），从现在重新累计`,
+    });
+  } catch (error) {
+    fail(res, error);
+  }
+});
+
 // 生产态同源托管前端；开发态由 Vite 提供页面。
 const distDir = resolve(import.meta.dirname, '../web/dist');
 if (existsSync(distDir)) {

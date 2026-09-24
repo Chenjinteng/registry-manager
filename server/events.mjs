@@ -42,6 +42,18 @@ export const COUNTED_METHODS = new Set(['HEAD', 'PUT']);
 const DEFAULT_BUFFER_SIZE = 200;
 
 /**
+ * 截断成有界字符串。
+ *
+ * 这几个身份字段来自**外部输入**并且会进内存里的排查缓冲，不能让它无界增长
+ * （User-Agent 之类的头理论上没有长度上限）。截断而不是丢弃：前 200 个字符足够
+ * 认出是哪个客户端，超出部分没有诊断价值。
+ */
+function clip(value, max) {
+  const text = String(value ?? '');
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/**
  * 判定一条事件是否计入热度。**纯函数**，便于在验证脚本里直接断言。
  *
  * @returns {{counted: boolean, reason: string, repository?: string, tag?: string,
@@ -172,6 +184,19 @@ export class ActivityStore {
         mediaType: String(event?.target?.mediaType ?? ''),
         repository: String(event?.target?.repository ?? ''),
         tag: String(event?.target?.tag ?? ''),
+        /*
+         * 客户端身份。热度被"某个自动化进程"刷高时（例如镜像同步工具按点扫全量），
+         * 这几个字段是唯一能把它和真人区分开的线索，所以必须在排查缓冲里留着：
+         *   - `useragent` 通常是最可靠的判据（`docker/27.x ...` vs `regclient/...`）；
+         *   - `addr` **实测在端口映射下是 Docker 网桥网关**（如 172.19.0.1），
+         *     不是真实客户端 —— 那种部署下它区分不了任何东西；
+         *   - `host` 是客户端请求用的 Host 头，内网里常常全员相同；
+         *   - `actor` 在**未开认证时是空的**，只有开了认证且用独立账号时才可用。
+         */
+        useragent: clip(event?.request?.useragent, 200),
+        addr: clip(event?.request?.addr, 64),
+        host: clip(event?.request?.host, 120),
+        actor: clip(event?.actor?.name, 120),
         reason: verdict.reason,
       };
 
@@ -251,6 +276,26 @@ export class ActivityStore {
 
   cleanup() {
     return this.#db.cleanup({ retentionDays: this.#retentionDays, dedupDays: this.#dedupDays });
+  }
+
+  /**
+   * 清空**全部**热度数据，用于"统计口径错了、想从头重计"。
+   *
+   * 和 `cleanup` 的区别是它不看保留期，一次清干净。**不碰拉取历史**
+   * （那是任务记录，不是统计口径的产物）。
+   *
+   * 连**去重窗口与内存缓冲一起清**，不然会出现两种迷惑现象：
+   *   - 留着 `event_seen` 的话，清空后同一批事件再投过来会被判成"重复投递"而不计入；
+   *   - 留着内存缓冲的话，界面上「最近事件」还有 200 条旧记录，看着像没清成功。
+   * 代价是清空瞬间如果 registry 正在重投旧事件，会有少量被重新计入 —— 对"从头重计"
+   * 这个语义来说是合理的。
+   */
+  purge() {
+    const removed = this.#db.purgeHeat();
+    this.#buffer.length = 0;
+    this.#accepted = 0;
+    this.#rejected = 0;
+    return removed;
   }
 
   close() {

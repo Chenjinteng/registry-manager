@@ -324,6 +324,17 @@ export interface StatsEventItem {
   mediaType: string;
   repository: string;
   tag: string;
+  /**
+   * 客户端身份，排查"热度是不是被自动化进程刷高了"时唯一的线索。
+   *
+   * `useragent` 通常最可靠（`docker/27.x ...` vs `regclient/...`）。另外三个各有局限：
+   * `addr` 在端口映射下是 Docker 网桥网关而不是真实客户端，`host` 内网里常常全员相同，
+   * `actor` 未开认证时是空的。
+   */
+  useragent: string;
+  addr: string;
+  host: string;
+  actor: string;
   /** 未计入时的原因（例如 NOT_MANIFEST / METHOD_GET）；计入时为 OK。 */
   reason: string;
   counted: boolean;
@@ -334,4 +345,12 @@ export interface StatsEventItem {
 export interface StatsEvents {
   items: StatsEventItem[];
   totals: { accepted: number; rejected: number; buffered: number };
+}
+
+/** 清空热度数据的结果：删掉了多少行。 */
+export interface HeatPurgeResult {
+  /** 按天聚合的行数（`activity_daily`）。 */
+  activity: number;
+  /** 幂等去重记录数（`event_seen`）。 */
+  seen: number;
 }

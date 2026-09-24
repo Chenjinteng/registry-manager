@@ -39,7 +39,14 @@ const nextId = () => `01a0d165-0000-7000-8000-${String(++seq).padStart(12, '0')}
 /** 用"一小时前"而不是固定日期，这样断言与运行日期无关。 */
 const recentIso = () => new Date(Date.now() - 3600_000).toISOString();
 
-/** manifest 事件。tag 只在按 tag 请求时出现 —— 真实 payload 就是这样。 */
+/**
+ * manifest 事件。tag 只在按 tag 请求时出现 —— 真实 payload 就是这样。
+ *
+ * `request` 里的 `addr` / `host` / `useragent` 都是**实测存在**的字段
+ * （`addr` 带端口，且端口映射下是 Docker 网桥网关而不是真实客户端）。
+ * 排查"热度是不是被同步工具刷高了"时，这几个是唯一的线索，所以 fixture 必须带上，
+ * 否则断言测不出我们到底存没存。
+ */
 function manifestEvent({ repository, action, method, tag, digest = 'sha256:beef' }) {
   const target = { mediaType: MANIFEST, digest, size: 3247, repository };
   if (tag !== undefined) {
@@ -50,7 +57,13 @@ function manifestEvent({ repository, action, method, tag, digest = 'sha256:beef'
     timestamp: recentIso(),
     action,
     target,
-    request: { id: nextId(), method, useragent: 'docker/29.6.1 go/go1.26.4' },
+    request: {
+      id: nextId(),
+      method,
+      useragent: 'docker/29.6.1 go/go1.26.4 git-commit/deadbeef os/linux arch/amd64 UpstreamClient(Docker-Client/29.6.1)',
+      addr: '172.19.0.1:56734',
+      host: '192.0.2.10:10001',
+    },
     actor: {},
   };
 }
@@ -62,7 +75,13 @@ function blobEvent({ repository, action, method, digest = 'sha256:cafe', size = 
     timestamp: recentIso(),
     action,
     target: { mediaType: 'application/octet-stream', digest, size, length: size, repository },
-    request: { id: nextId(), method, useragent: 'docker/29.6.1 go/go1.26.4' },
+    request: {
+      id: nextId(),
+      method,
+      useragent: 'docker/29.6.1 go/go1.26.4',
+      addr: '172.19.0.1:56735',
+      host: '192.0.2.10:10001',
+    },
     actor: {},
   };
 }
@@ -286,6 +305,29 @@ const store = new ActivityStore({ db, retentionDays: 90 });
     recent.some((e) => e.counted === false && typeof e.reason === 'string' && e.reason.length > 0),
     JSON.stringify(recent.map((e) => e.reason).slice(0, 5))
   );
+
+  /*
+   * 身份字段。真实场景：registry 上跑着 regsync 之类的同步工具按点扫全量，
+   * 把每个 tag 的热度都刷成同一个数 —— 这时唯一能把机器和真人分开的就是这几个字段。
+   * 其中只有 `useragent` 可靠：端口映射下 `addr` 是网桥网关、未开认证时 `actor` 是空的。
+   */
+  const sample = store.recentEvents(200).find((e) => e.counted);
+  check(
+    '原始事件里保留了 User-Agent（区分 docker CLI 与同步工具的判据）',
+    Boolean(sample?.useragent?.startsWith('docker/')),
+    JSON.stringify(sample?.useragent?.slice(0, 40))
+  );
+  check(
+    '保留了来源地址，且带端口（实测形状 172.19.0.1:56734）',
+    /^\d+\.\d+\.\d+\.\d+:\d+$/.test(sample?.addr ?? ''),
+    JSON.stringify(sample?.addr)
+  );
+  check('保留了 Host 头', sample?.host === '192.0.2.10:10001', JSON.stringify(sample?.host));
+  check(
+    '未开认证时 actor 是空的 —— 所以它不能当默认判据',
+    sample?.actor === '',
+    JSON.stringify(sample?.actor)
+  );
 }
 
 store.close();
@@ -295,6 +337,94 @@ store.close();
   const reopened = new ActivityStore({ db: new Db({ filePath: dbFile }), retentionDays: 90 });
   check('重新打开已有数据库不会报错（user_version 已落盘）', reopened.summary(30).total === 4);
   reopened.close();
+}
+
+/*
+ * 清空热度、从头重计。
+ *
+ * 为什么它和身份字段是同一个需求的两半：口径改对之后，已经聚合进 `activity_daily`
+ * 的行**追溯不出来**（当初没留身份字段），唯一出路就是清空重来。
+ * 所以「看得出来是谁刷的」和「清得干净」必须一起做。
+ *
+ * 用**独立的库文件**：这一段要清空整张表，不能污染上面那些断言依赖的数据。
+ */
+{
+  const purgeDir = mkdtempSync(join(tmpdir(), 'registry-manager-purge-'));
+  const purgeStore = new ActivityStore({
+    db: new Db({ filePath: join(purgeDir, 'registry-manager.db') }),
+    retentionDays: 90,
+  });
+
+  // 同一个仓库、同一个 tag，一个来自同步工具、一个来自 docker CLI。
+  const syncEvent = {
+    id: nextId(),
+    timestamp: recentIso(),
+    action: 'push',
+    target: { mediaType: MANIFEST, digest: 'sha256:sync', size: 100, repository: 'busybox', tag: 'latest' },
+    request: {
+      id: nextId(),
+      method: 'PUT',
+      useragent: 'regclient/v0.8.0 (https://github.com/regclient/regclient)',
+      addr: '172.19.0.1:41234',
+      host: '192.0.2.10:10001',
+    },
+    actor: {},
+  };
+  const dockerEvent = manifestEvent({ repository: 'busybox', action: 'pull', method: 'HEAD', tag: 'latest' });
+  purgeStore.ingest({ events: [syncEvent, dockerEvent] });
+
+  const syncs = purgeStore.recentEvents(10).filter((e) => e.useragent.startsWith('regclient/'));
+  check(
+    '同一个仓库/tag 下能把同步工具和 docker CLI 分开（仓库名与 tag 完全一样）',
+    syncs.length === 1 && syncs[0].repository === 'busybox' && syncs[0].tag === 'latest',
+    JSON.stringify(syncs.map((e) => e.useragent.slice(0, 20)))
+  );
+  check(
+    '身份字段原样落到事件上（前端那一列才有得看）',
+    syncs[0]?.addr === '172.19.0.1:41234' && syncs[0]?.host === '192.0.2.10:10001',
+    JSON.stringify({ addr: syncs[0]?.addr, host: syncs[0]?.host })
+  );
+
+  // 这些字段来自外部输入，不能无界撑大内存缓冲。
+  purgeStore.ingest({
+    events: [
+      {
+        ...manifestEvent({ repository: 'huge', action: 'pull', method: 'HEAD', tag: 'x' }),
+        request: { id: nextId(), method: 'HEAD', useragent: 'x'.repeat(5000), addr: 'y'.repeat(500) },
+      },
+    ],
+  });
+  const clipped = purgeStore.recentEvents(10).find((e) => e.repository === 'huge');
+  check(
+    '超长身份字段被截断成有界字符串',
+    clipped.useragent.length === 201 && clipped.addr.length === 65,
+    `ua=${clipped.useragent.length} addr=${clipped.addr.length}`
+  );
+
+  // 三条计入的：同步工具的 push、docker CLI 的 pull、以及那条超长 UA 的 pull。
+  check('清空前确实有热度', purgeStore.summary(30).total === 3, String(purgeStore.summary(30).total));
+  const removed = purgeStore.purge();
+  check(
+    '清空返回删掉的行数（界面要据此回显，不能只说一句"成功"）',
+    removed.activity >= 1 && removed.seen >= 1,
+    JSON.stringify(removed)
+  );
+  check('清空后热度归零', purgeStore.summary(30).total === 0, String(purgeStore.summary(30).total));
+  check(
+    '清空后累计计数与内存缓冲一起归零（否则面板还挂着旧事件，看着像没清成功）',
+    JSON.stringify(purgeStore.totals()) === JSON.stringify({ accepted: 0, rejected: 0, buffered: 0 }),
+    JSON.stringify(purgeStore.totals())
+  );
+
+  /*
+   * 去重窗口必须一起清：只删聚合而留下 event_seen，会让清空后重投的事件被判成重复，
+   * 表现是"清空之后热度再也不涨了"。
+   */
+  const replay = purgeStore.ingest({ events: [syncEvent] });
+  check('清空后同一个 event.id 能重新计入（去重窗口也清了）', replay.accepted === 1, JSON.stringify(replay));
+
+  purgeStore.close();
+  rmSync(purgeDir, { recursive: true, force: true });
 }
 
 // ───────────────────── 九、HTTP 层：Content-Type 必须能被解析 ─────────────────────
@@ -345,7 +475,12 @@ store.close();
             repository: 'postgres',
             tag: '15',
           },
-          request: { method: 'HEAD' },
+          request: {
+            method: 'HEAD',
+            useragent: 'regclient/v0.8.0 (https://github.com/regclient/regclient)',
+            addr: '172.19.0.1:41234',
+            host: '192.0.2.10:10001',
+          },
         },
       ],
     });
@@ -378,6 +513,30 @@ store.close();
       body: envelope,
     });
     check('HTTP 层用错误密钥返回 401', badToken.status === 401, `HTTP ${badToken.status}`);
+
+    /*
+     * 身份字段必须能**从接口读到** —— 只在内存里存着没用，人工排查是在浏览器/curl 上做的。
+     * 这条也是"热度被同步工具刷高"时唯一的取证路径。
+     */
+    const eventsRes = await (await fetch(`${base}/api/stats/events?limit=10`)).json();
+    const httpEvent = eventsRes?.data?.items?.[0];
+    check(
+      '接口能读到客户端身份（UA / 来源 / Host），排查时才有据可查',
+      httpEvent?.useragent?.startsWith('regclient/') &&
+        httpEvent?.addr === '172.19.0.1:41234' &&
+        httpEvent?.host === '192.0.2.10:10001',
+      JSON.stringify({ ua: httpEvent?.useragent?.slice(0, 16), addr: httpEvent?.addr, host: httpEvent?.host })
+    );
+
+    const purgeRes = await fetch(`${base}/api/stats/heat`, { method: 'DELETE' });
+    const purgeBody = await purgeRes.json();
+    check(
+      'HTTP 层能清空热度，并回显删掉的行数',
+      purgeRes.status === 200 && purgeBody?.success === true && purgeBody?.data?.activity >= 1,
+      `HTTP ${purgeRes.status} ${JSON.stringify(purgeBody?.data)}`
+    );
+    const afterPurge = await (await fetch(`${base}/api/stats/summary?days=30`)).json();
+    check('清空后总览归零', afterPurge?.data?.total === 0, String(afterPurge?.data?.total));
   }
 
   proc.kill('SIGTERM');

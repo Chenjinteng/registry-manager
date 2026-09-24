@@ -115,7 +115,7 @@ docker compose up -d --build
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.5.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.6.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -126,7 +126,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.5.0 .
+docker build -t registry-manager:0.6.0 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -134,7 +134,7 @@ docker build -t registry-manager:0.5.0 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.5.0 .
+  -t registry-manager:0.6.0 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -145,7 +145,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.5.0 .
+  -t registry-manager:0.6.0 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -161,7 +161,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.5.0
+  registry-manager:0.6.0
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -187,8 +187,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.5.0 192.0.2.10:10001/example/registry-manager:0.5.0
-docker push 192.0.2.10:10001/example/registry-manager:0.5.0
+docker tag registry-manager:0.6.0 192.0.2.10:10001/example/registry-manager:0.6.0
+docker push 192.0.2.10:10001/example/registry-manager:0.6.0
 ```
 
 ### 镜像内置
@@ -264,7 +264,8 @@ docker push 192.0.2.10:10001/example/registry-manager:0.5.0
 | GET | `/api/stats/top?days=&limit=&by=repository\|tag` | 热度 Top 榜 |
 | GET | `/api/stats/series?days=&repository=` | 按天时间序列（`repository` 留空为全部） |
 | GET | `/api/stats/repositories?days=` | 全部有热度的仓库（返回 map，供列表页 join） |
-| GET | `/api/stats/events?limit=` | 最近收到的原始事件（含未被计入的原因），**排查用** |
+| GET | `/api/stats/events?limit=` | 最近收到的原始事件（含未被计入的原因与客户端身份），**排查用** |
+| DELETE | `/api/stats/heat` | **清空全部热度数据**（不按保留期）。只清热度聚合与去重记录，拉取历史不受影响 |
 
 `/api/registry-events` 是唯一面向机器的写接口，因此和其它接口有两点不同：
 **失败返回真实的 HTTP 状态码**（401 / 503 / 400，registry 靠状态码决定重试与告警），
@@ -611,9 +612,33 @@ notifications:
 
 - 热度**从配置生效那天开始**统计，之前的历史补不回来。
 - 失败的拉取（401 / 404）不产生事件，所以热度只反映**成功**的推送与拉取。
-- **不统计客户端 IP**：容器端口映射后 registry 看到的是 Docker 网桥地址，不是真实客户端。
 - 保留期默认 90 天（`REGISTRY_STATS_RETENTION_DAYS`），按天聚合。
-- 热度页底部有「最近事件」面板：事件到了但没被计入时，能直接看出原因。
+- 热度页底部有「最近事件」面板：事件到了但没被计入时，能直接看出原因，
+  并能看到每条事件的客户端身份（`User-Agent` / 来源地址 / Host / 账号）。
+
+### 自动化流量会把热度刷高
+
+registry 上常驻的同步工具（regsync、skopeo 之类）会**按点扫全量**，于是每个 tag 的
+热度都被刷成同一个数、「最近活动」也全是同一个时刻 —— 这时候热度榜测的是工具的心跳，
+不是人。
+
+**registry 侧排不掉它**：`notifications` 的过滤只有 `ignore.mediatypes` 与
+`ignore.actions` 两项，没有按客户端 / 仓库 / User-Agent 过滤的入口。判断"是谁在打"
+只能在我们这侧做，判据是事件里的 `request.useragent`：
+
+| 字段 | 能不能用来区分客户端 |
+| --- | --- |
+| `request.useragent` | **最可靠**。真人用 docker CLI（`docker/27.x ...`），同步工具带自己的 UA（`regclient/...` / `skopeo/...`） |
+| `request.addr` | 多半不行。容器**端口映射**后 registry 看到的是 Docker 网桥地址（如 `172.19.0.1`），所有人都是它 |
+| `request.host` | 通常不行。内网里所有客户端用的 Host 头都一样 |
+| `actor.name` | 只有 registry **开了认证且同步工具用独立账号**时才可用；未开认证时它是空的 |
+
+所以排查顺序是：打开热度页的「最近事件」，看「客户端」那一列有没有一个 UA 整齐地
+刷满所有仓库。确认之后再决定怎么过滤（当前版本**还没有**内置排除规则，先把身份看清）。
+
+口径改正之后，已经算歪的历史**追溯不回来**（`activity_daily` 当初没留身份字段），
+用 **设置页 → 清空热度数据** 清掉重新累计即可。它只清热度聚合与幂等去重记录，
+**拉取历史不受影响**。
 
 ### 与 Prometheus 指标的关系
 

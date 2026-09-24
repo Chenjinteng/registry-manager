@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Alert, App, Button, Descriptions, Space, Tag } from 'antd';
-import { ApiOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ApiOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
 
-import { probeRegistry, refreshInventory } from '../api';
+import { probeRegistry, purgeHeat, refreshInventory } from '../api';
 import type { ApiResult, AppConfig, Inventory } from '../types';
 import { formatDateTime } from '../utils';
 
@@ -14,9 +14,10 @@ interface Props {
 }
 
 export default function SettingsPage({ config, inventory, onInventoryChange }: Props) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [probing, setProbing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [purging, setPurging] = useState(false);
   const [notice, setNotice] = useState<ApiResult<unknown> | null>(null);
 
   const handleProbe = async () => {
@@ -46,6 +47,21 @@ export default function SettingsPage({ config, inventory, onInventoryChange }: P
       }
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const handlePurgeHeat = async () => {
+    setPurging(true);
+    setNotice(null);
+    try {
+      const result = await purgeHeat();
+      if (result.success) {
+        message.success(result.message || '已清空热度数据');
+      } else {
+        setNotice(result);
+      }
+    } finally {
+      setPurging(false);
     }
   };
 
@@ -153,6 +169,47 @@ PORT=8787 pnpm start
           </div>
         }
       />
+
+      {config?.statsEnabled ? (
+        <Alert
+          type="info"
+          showIcon
+          message="热度数据可以从头重计"
+          description={
+            <div>
+              <div>
+                热度按天聚合在本地数据库里，保留 {config.statsRetentionDays} 天
+                {config.statsSince ? `（最早一天 ${config.statsSince}）` : ''}。 如果统计口径改过
+                —— 例如发现某个自动化进程（镜像同步工具）也在按点扫全量、把热度刷了上去 ——
+                可以把它清空、从现在重新累计。
+              </div>
+              <div style={{ marginTop: 4, color: 'var(--color-text-3)' }}>
+                只清除热度聚合与幂等去重记录，<strong>拉取历史不受影响</strong>。此操作不可撤销。
+              </div>
+              <Button
+                danger
+                size="small"
+                icon={<DeleteOutlined />}
+                loading={purging}
+                style={{ marginTop: 8 }}
+                onClick={() =>
+                  modal.confirm({
+                    title: '清空全部热度数据？',
+                    content:
+                      '已统计的热度会全部归零，从现在重新累计。拉取历史不受影响。此操作不可撤销。',
+                    okText: '清空',
+                    okButtonProps: { danger: true },
+                    cancelText: '取消',
+                    onOk: handlePurgeHeat,
+                  })
+                }
+              >
+                清空热度数据
+              </Button>
+            </div>
+          }
+        />
+      ) : null}
 
       <Alert
         type={config?.allowDelete ? 'warning' : 'info'}

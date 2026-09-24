@@ -136,7 +136,8 @@ const send = (method, params = {}) =>
   });
 
 const evaluate = async (expression) => {
-  const r = await send('Runtime.evaluate', { expression, returnByValue: true });
+  // awaitPromise：页面里要跑 fetch(...) 这类异步表达式时，不设它拿回来的是个 Promise 对象。
+  const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.text);
   return r.result.value;
 };
@@ -363,6 +364,65 @@ try {
       badRounds.length === 0,
       badRounds.length ? JSON.stringify(badRounds[0]) : '6 次切换全部一致'
     );
+
+    /*
+     * 「最近事件」面板的「客户端」列。
+     *
+     * 存在的理由：registry 上常驻的同步工具会按点扫全量、把每个 tag 的热度刷成同一个数，
+     * 而 registry 侧的 notifications 只有 ignore.mediatypes / ignore.actions 两个口子，
+     * 排不掉它。能不能把机器和真人分开，全看这一列。
+     *
+     * 注意这个面板是 **Collapse 且默认折叠** 的 —— 不先展开，`thead` 根本不在 DOM 里
+     * （会得到一个"看起来像通过"的空结果）。
+     */
+    const eventPanel = () =>
+      evaluate(`(() => {
+        const header = [...document.querySelectorAll('.ant-collapse-header')]
+          .find((h) => h.innerText.includes('最近事件'));
+        if (!header) return null;
+        const item = header.closest('.ant-collapse-item');
+        const headers = [...item.querySelectorAll('thead th')].map((th) => th.innerText.trim());
+        const idx = headers.indexOf('客户端');
+        const cells = idx < 0
+          ? []
+          : [...item.querySelectorAll('tbody tr')].map((tr) => tr.children[idx]?.innerText.trim() ?? '');
+        return {
+          headers,
+          idx,
+          cells,
+          expanded: item.className.includes('ant-collapse-item-active'),
+        };
+      })()`);
+
+    let panel = await eventPanel();
+    if (panel && !panel.expanded) {
+      await evaluate(
+        `[...document.querySelectorAll('.ant-collapse-header')].find((h) => h.innerText.includes('最近事件'))?.click()`
+      );
+      await sleep(900);
+      panel = await eventPanel();
+    }
+    check(
+      '「最近事件」面板能展开（客户端身份就藏在它里面）',
+      panel !== null && panel.expanded === true,
+      JSON.stringify({ found: panel !== null, expanded: panel?.expanded })
+    );
+    check(
+      '「最近事件」面板有「客户端」列（排查是谁在打）',
+      Boolean(panel?.idx >= 0),
+      JSON.stringify(panel?.headers)
+    );
+    check(
+      '有事件时「客户端」列真的显示了 User-Agent（不是一整列空）',
+      !panel?.cells?.length || panel.cells.some((cell) => cell.length > 0),
+      JSON.stringify(panel?.cells?.slice(0, 4))
+    );
+    // 截图前先把它滚进视野：这个面板在页面最底部，不滚的话截到的是 Top 榜单。
+    await evaluate(
+      `[...document.querySelectorAll('.ant-collapse-header')].find((h) => h.innerText.includes('最近事件'))?.scrollIntoView({ block: 'center' })`
+    );
+    await sleep(400);
+    console.log('   截图:', await shot('layout-stats-events'));
   } else {
     skip('热度页布局', '热度页没渲染出来（可能未启用热度统计）');
   }
@@ -542,6 +602,68 @@ try {
       return l === null || l > 0.6;
     }),
     Object.entries(backSnap.surfaces).filter(([, bg]) => luminance(bg) !== null && luminance(bg) <= 0.6).map(([s, bg]) => `${s}=${bg}`).join(', ')
+  );
+
+  /*
+   * ───────────────────── 设置页：清空热度的入口 ─────────────────────
+   *
+   * 这是一个**不可撤销**的动作，所以断言的不是"能点"，而是"点一下不会立刻生效"：
+   * 必须弹二次确认、必须写清后果。这三条只有真的点一遍才知道，
+   * 读代码看不出确认框到底有没有挂上去（Modal 是运行时创建的）。
+   */
+  console.log('\n──── 设置页：清空热度 ────');
+  await evaluate(
+    `[...document.querySelectorAll('.ant-segmented-item')].find((el) => el.textContent.includes('设置'))?.click()`
+  );
+  await sleep(1000);
+
+  const purgeBtn = await evaluate(`(() => {
+    const btn = [...document.querySelectorAll('button')].find((b) => b.innerText.includes('清空热度数据'));
+    return btn ? { text: btn.innerText.trim(), danger: btn.className.includes('dangerous') } : null;
+  })()`);
+  check('设置页有「清空热度数据」入口', purgeBtn !== null, JSON.stringify(purgeBtn));
+  check('这个按钮是危险样式（红色），不会跟旁边的普通按钮混在一起', purgeBtn?.danger === true);
+  await evaluate(
+    `[...document.querySelectorAll('button')].find((b) => b.innerText.includes('清空热度数据'))?.scrollIntoView({ block: 'center' })`
+  );
+  await sleep(400);
+  console.log('   截图:', await shot('layout-settings-purge'));
+
+  const heatTotal = () =>
+    evaluate(`fetch('/api/stats/summary?days=30').then((r) => r.json()).then((j) => j.data.total)`);
+  const beforeTotal = await heatTotal();
+
+  await evaluate(
+    `[...document.querySelectorAll('button')].find((b) => b.innerText.includes('清空热度数据'))?.click()`
+  );
+  await sleep(600);
+  const dialog = await evaluate(`(() => {
+    const modal = document.querySelector('.ant-modal-confirm');
+    if (!modal) return null;
+    return {
+      title: modal.querySelector('.ant-modal-confirm-title')?.innerText.trim() ?? '',
+      body: (modal.innerText || '').replace(/\\s+/g, ' '),
+    };
+  })()`);
+  check('点一下不会立刻清空，而是先弹确认框', dialog !== null, JSON.stringify(dialog?.title));
+  check(
+    '确认框写清了后果（不可撤销；拉取历史不受影响）',
+    Boolean(dialog?.body?.includes('不可撤销') && dialog.body.includes('拉取历史')),
+    dialog?.body?.slice(0, 90)
+  );
+
+  // 点「取消」：数据一行都不该少，弹窗要关掉。
+  // 注意 AntD 会在两个汉字之间插空格（「取 消」），所以按去空白后的文本匹配。
+  await evaluate(
+    `[...document.querySelectorAll('.ant-modal-confirm .ant-btn')]
+      .find((b) => b.innerText.replace(/\\s+/g, '') === '取消')?.click()`
+  );
+  await sleep(700);
+  const afterTotal = await heatTotal();
+  check('点「取消」后热度数据一行都没少', afterTotal === beforeTotal, `${beforeTotal} → ${afterTotal}`);
+  check(
+    '点「取消」后确认框关闭',
+    (await evaluate(`!document.querySelector('.ant-modal-confirm')`)) === true
   );
 } finally {
   ws.close();

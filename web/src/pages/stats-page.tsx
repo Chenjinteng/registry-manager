@@ -272,6 +272,33 @@ export default function StatsPage({ config, onConfigChange }: Props) {
     },
     { title: 'tag', dataIndex: 'tag', key: 'tag', width: 130, render: monoOrDash },
     {
+      title: '客户端',
+      dataIndex: 'useragent',
+      key: 'useragent',
+      width: 220,
+      /*
+       * 排查"热度是不是被自动化进程刷高了"的关键一列：真人用 docker CLI，
+       * 同步工具用 regclient / skopeo，User-Agent 一眼分得开。
+       * 另外三个身份字段（来源 addr / host / actor）放在悬停里 —— 它们通常没有区分度
+       * （端口映射下 addr 是网桥网关、未开认证时 actor 为空），占一整列不值当。
+       */
+      render: (value: string, record) => {
+        const detail = [
+          `User-Agent：${record.useragent || '—'}`,
+          `来源：${record.addr || '—'}`,
+          `Host：${record.host || '—'}`,
+          `账号：${record.actor || '（未认证）'}`,
+        ].join('\n');
+        return (
+          <Tooltip title={<span style={{ whiteSpace: 'pre-line' }}>{detail}</span>}>
+            <span className="mono ellipsis" style={{ display: 'block' }}>
+              {value || '—'}
+            </span>
+          </Tooltip>
+        );
+      },
+    },
+    {
       title: '是否计入',
       key: 'counted',
       width: 260,

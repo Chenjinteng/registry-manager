@@ -407,6 +407,29 @@ export class Db {
     return { pulls: Number(removed.changes ?? 0) };
   }
 
+  /**
+   * 清空**全部**热度数据（不是按保留期裁剪）。
+   *
+   * 用在"发现统计口径把机器流量也算进来了、修好之后想从头重计"。
+   * 与 `cleanup` 一样**刻意不碰 `pull_jobs`** —— 拉取历史是任务记录，
+   * 不是统计口径的产物，清热度不该把"上周搬了哪些镜像"一起抹掉。
+   *
+   * 两张表必须在**同一个事务**里删：只删 `activity_daily` 而留下 `event_seen`，
+   * 会让清空后重投的事件被判成重复而永远计不进去（服务端已经有去重窗口）。
+   */
+  purgeHeat() {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const activity = this.#db.prepare('DELETE FROM activity_daily').run();
+      const seen = this.#db.prepare('DELETE FROM event_seen').run();
+      this.#db.exec('COMMIT');
+      return { activity: Number(activity.changes ?? 0), seen: Number(seen.changes ?? 0) };
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   /** 最早的一条数据日期，用于界面上说明"热度从什么时候开始有"。 */
   earliestDay() {
     const row = this.#db.prepare('SELECT MIN(day) AS day FROM activity_daily').get();

@@ -6,6 +6,7 @@ import type {
   CredentialPatch,
   DeleteTagPayload,
   DestStatus,
+  HeatPurgeResult,
   Inventory,
   ProxyEntry,
   ProxyInput,
@@ -169,3 +170,9 @@ export const fetchRepositoryStats = (days: number) =>
 
 export const fetchStatsEvents = (limit = 50) =>
   request<StatsEvents>(`/api/stats/events?limit=${limit}`);
+
+/**
+ * 清空全部热度数据（不按保留期），用于口径改正后从头重计。
+ * **只清热度**，拉取历史不受影响。
+ */
+export const purgeHeat = () => request<HeatPurgeResult>('/api/stats/heat', { method: 'DELETE' });
