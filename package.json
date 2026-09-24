@@ -1,7 +1,7 @@
 {
   "name": "registry-manager",
   "private": true,
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "独立的 CNCF Distribution 镜像仓库管理 Web",
   "type": "module",
   "packageManager": "pnpm@11.20.0",

@@ -27,7 +27,7 @@
 import { DatabaseSync } from 'node:sqlite';
 
 /** 当前 schema 版本。加表/改列时 +1，并在 #migrate 里补迁移分支。 */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** 单条 SQL 的忙等上限：并发写时宁可等一会，也不要直接抛 SQLITE_BUSY。 */
 const BUSY_TIMEOUT_MS = 5000;
@@ -119,6 +119,20 @@ export class Db {
 
         CREATE INDEX IF NOT EXISTS idx_pull_jobs_finished
           ON pull_jobs(finished_at DESC);
+      `);
+    }
+
+    // v2 → v3：界面上管理的热度忽略规则。
+    //
+    // 为什么不写回 `registry.config.json`：那是**人写的**配置文件，工具偷偷改它迟早冲突；
+    // 而且容器里它常常是只读挂载、甚至压根没挂进去（`.dockerignore` 排除了），
+    // 只有 `/app/data` 是可写卷。运行时可变的状态就该落在数据目录里。
+    if (current < 3) {
+      this.#db.exec(`
+        CREATE TABLE IF NOT EXISTS ignored_clients(
+          useragent  TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL
+        ) WITHOUT ROWID;
       `);
     }
 
@@ -428,6 +442,44 @@ export class Db {
       this.#db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /*
+   * ── 界面上管理的热度忽略规则 ──
+   *
+   * 大小写不敏感是**匹配规则决定的**（`classifyEvent` 里用小写比较），
+   * 所以这里存原样（要回显给使用者看），但**去重与删除都按小写比**，
+   * 免得 `RegClient/RegSync` 和 `regclient/regsync` 存成两条、删了一条还剩一条。
+   */
+
+  /** 所有界面规则，按加入顺序返回。 */
+  listIgnoredClients() {
+    return this.#db
+      .prepare('SELECT useragent, created_at FROM ignored_clients ORDER BY created_at, useragent')
+      .all()
+      .map((r) => ({ useragent: String(r.useragent), createdAt: String(r.created_at) }));
+  }
+
+  /** @returns {{added: boolean}} added=false 表示这条规则（忽略大小写后）已经存在。 */
+  addIgnoredClient(useragent, at) {
+    const existing = this.#db
+      .prepare('SELECT useragent FROM ignored_clients WHERE lower(useragent) = lower(?)')
+      .get(useragent);
+    if (existing) {
+      return { added: false };
+    }
+    this.#db
+      .prepare('INSERT INTO ignored_clients(useragent, created_at) VALUES (?, ?)')
+      .run(useragent, at);
+    return { added: true };
+  }
+
+  /** @returns {{removed: boolean}} removed=false 表示本来就没有这条规则。 */
+  removeIgnoredClient(useragent) {
+    const res = this.#db
+      .prepare('DELETE FROM ignored_clients WHERE lower(useragent) = lower(?)')
+      .run(useragent);
+    return { removed: Number(res.changes ?? 0) > 0 };
   }
 
   /** 最早的一条数据日期，用于界面上说明"热度从什么时候开始有"。 */

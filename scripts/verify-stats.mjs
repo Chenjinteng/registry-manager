@@ -684,6 +684,74 @@ store.close();
       JSON.stringify({ reason: ignoredEntry?.reason, counted: ignoredEntry?.counted })
     );
 
+    /*
+     * 界面上的规则管理：接口层走一遍。
+     * 重点是"环境变量那条删不掉"必须由**服务端**保证 —— 界面把按钮藏起来不算数，
+     * 直接打接口也得删不动。
+     */
+    const rulesRes = await (await fetch(`${base}/api/stats/ignore`)).json();
+    check(
+      '接口回显规则，并分开标明来源（env / panel）',
+      JSON.stringify(rulesRes?.data?.env) === JSON.stringify(['regclient/regsync', 'Skopeo']) &&
+        Array.isArray(rulesRes?.data?.panel) &&
+        rulesRes.data.panel.length === 0,
+      JSON.stringify(rulesRes?.data)
+    );
+
+    const addRes = await fetch(`${base}/api/stats/ignore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ useragent: 'panel-client/1.0' }),
+    });
+    const addBody = await addRes.json();
+    check(
+      'HTTP 层能加规则，并回显新的生效列表',
+      addRes.status === 200 && addBody?.data?.effective?.includes('panel-client/1.0'),
+      `HTTP ${addRes.status} ${JSON.stringify(addBody?.data)}`
+    );
+
+    const blankRes = await fetch(`${base}/api/stats/ignore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ useragent: '   ' }),
+    });
+    const blankBody = await blankRes.json();
+    /*
+     * 注意这里断的是**信封**而不是 HTTP 状态码：本仓库的 `fail()` 一律回 200 +
+     * `success:false`，前端 `request()` 读的也是信封（它完全忽略状态码）。
+     * 别"顺手改成 400" —— 那和其余接口不一致，而且前端本来就只看 success。
+     */
+    check(
+      '空规则被拒（否则会把所有事件都判成忽略、热度归零）',
+      blankBody?.success === false && blankBody?.code === 'INVALID_IGNORE_RULE',
+      JSON.stringify({ status: blankRes.status, code: blankBody?.code, message: blankBody?.message })
+    );
+
+    const dropEnvRes = await fetch(`${base}/api/stats/ignore`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ useragent: 'regclient/regsync' }),
+    });
+    const dropEnvBody = await dropEnvRes.json();
+    check(
+      '环境变量那条**在服务端**也删不掉，且仍然生效',
+      dropEnvRes.status === 200 &&
+        dropEnvBody?.data?.effective?.some((rule) => rule.toLowerCase() === 'regclient/regsync'),
+      JSON.stringify(dropEnvBody?.data)
+    );
+
+    const dropRes = await fetch(`${base}/api/stats/ignore`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ useragent: 'panel-client/1.0' }),
+    });
+    const dropBody = await dropRes.json();
+    check(
+      'HTTP 层能删界面规则',
+      dropRes.status === 200 && !dropBody?.data?.effective?.includes('panel-client/1.0'),
+      JSON.stringify(dropBody?.data)
+    );
+
     const purgeRes = await fetch(`${base}/api/stats/heat`, { method: 'DELETE' });
     const purgeBody = await purgeRes.json();
     check(
@@ -843,6 +911,111 @@ store.close();
 
   selfStore.close();
   rmSync(selfDir, { recursive: true, force: true });
+}
+
+// ───────────────────── 十三、界面上管理的忽略规则 ─────────────────────
+//
+// 环境变量那套是"改配置 + 重启"，日常太笨重：你在「最近事件」里看到一条刷屏的 UA，
+// 应该当场就能排掉。所以规则改成**存 SQLite、界面增删、立即生效**。
+//
+// 两个来源**取并集**：环境变量是声明式部署用的基线（界面上删不掉），界面是日常入口。
+// 混成一条列表的话，用户删了没反应时根本不知道去哪找 —— 所以这里要逐条钉住来源。
+{
+  const ruleDir = mkdtempSync(join(tmpdir(), 'registry-manager-rules-'));
+  const ruleFile = join(ruleDir, 'registry-manager.db');
+  const ruleStore = new ActivityStore({
+    db: new Db({ filePath: ruleFile }),
+    retentionDays: 90,
+    ignoreUseragents: ['from-env'],
+  });
+
+  /** 一条同步工具的事件（与实测 UA 同形）。 */
+  const syncEvent = () => {
+    const event = manifestEvent({ repository: 'busybox', action: 'pull', method: 'HEAD', tag: 'latest' });
+    event.request.useragent = 'regclient/regsync (v0.11.5)';
+    return event;
+  };
+  const envEvent = () => {
+    const event = manifestEvent({ repository: 'env-repo', action: 'pull', method: 'HEAD', tag: 'latest' });
+    event.request.useragent = 'from-env/1.0';
+    return event;
+  };
+
+  const initial = ruleStore.ignoreRules();
+  check(
+    '初始状态：环境变量那条是基线，界面列表为空，生效列表只有它',
+    JSON.stringify(initial.env) === JSON.stringify(['from-env']) &&
+      initial.panel.length === 0 &&
+      JSON.stringify(initial.effective) === JSON.stringify(['from-env']),
+    JSON.stringify(initial)
+  );
+  check(
+    '环境变量那条一开始就在生效（不必等界面上加）',
+    ruleStore.ingest({ events: [envEvent()] }).accepted === 0
+  );
+
+  check('还没加规则时，同步工具的事件是计入的', ruleStore.ingest({ events: [syncEvent()] }).accepted === 1);
+
+  check('加一条界面规则成功', ruleStore.addIgnoreRule('regclient/regsync').added === true);
+  check(
+    '新规则立刻出现在界面上',
+    ruleStore.ignoreRules().panel.includes('regclient/regsync'),
+    JSON.stringify(ruleStore.ignoreRules())
+  );
+  /*
+   * 这一条是本节的靶子：**不重建 store**（等价于不重启进程），新规则必须立刻生效。
+   * 这条断言挡住"加了规则但缓存没刷新"——那种表现是"保存成功、热度照旧"。
+   */
+  const afterAdd = ruleStore.ingest({ events: [syncEvent()] });
+  check(
+    '不用重建 store（等于不用重启），新规则立刻生效',
+    afterAdd.accepted === 0 && afterAdd.skipped === 1,
+    JSON.stringify(afterAdd)
+  );
+
+  check(
+    '重复添加（忽略大小写）不会变成两条',
+    ruleStore.addIgnoreRule('RegClient/RegSync').added === false &&
+      ruleStore.ignoreRules().panel.length === 1,
+    JSON.stringify(ruleStore.ignoreRules().panel)
+  );
+  check(
+    '环境变量那条在界面上删不掉（界面只管界面加的）',
+    ruleStore.removeIgnoreRule('from-env').removed === false &&
+      ruleStore.ignoreRules().effective.includes('from-env'),
+    JSON.stringify(ruleStore.ignoreRules())
+  );
+  check(
+    '删掉界面规则后立刻恢复计入',
+    ruleStore.removeIgnoreRule('regclient/regsync').removed === true &&
+      ruleStore.ingest({ events: [syncEvent()] }).accepted === 1
+  );
+
+  /*
+   * 空规则是个真陷阱：`''.includes` 恒为真，一条空规则会把**所有**事件判成忽略、
+   * 热度直接归零。匹配函数里显式跳过了空/空白片段。
+   */
+  check(
+    '空 / 只含空白的规则不会把所有事件都判成忽略',
+    classifyEvent(syncEvent(), { ignoreUseragents: ['', '   '] }).counted === true
+  );
+
+  // 落库：重启之后规则还在（否则"界面配的"就成了易失状态）。
+  ruleStore.addIgnoreRule('persisted/1.0');
+  ruleStore.close();
+  const reopenedRules = new ActivityStore({ db: new Db({ filePath: ruleFile }), retentionDays: 90 });
+  check(
+    '界面规则落在 SQLite 里，重启后还在',
+    reopenedRules.ignoreRules().panel.includes('persisted/1.0'),
+    JSON.stringify(reopenedRules.ignoreRules())
+  );
+  check(
+    '重启后不复存在已经删掉的那条',
+    !reopenedRules.ignoreRules().panel.includes('regclient/regsync'),
+    JSON.stringify(reopenedRules.ignoreRules())
+  );
+  reopenedRules.close();
+  rmSync(ruleDir, { recursive: true, force: true });
 }
 
 rmSync(dir, { recursive: true, force: true });

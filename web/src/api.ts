@@ -7,6 +7,7 @@ import type {
   DeleteTagPayload,
   DestStatus,
   HeatPurgeResult,
+  IgnoreRules,
   Inventory,
   ProxyEntry,
   ProxyInput,
@@ -176,3 +177,25 @@ export const fetchStatsEvents = (limit = 50) =>
  * **只清热度**，拉取历史不受影响。
  */
 export const purgeHeat = () => request<HeatPurgeResult>('/api/stats/heat', { method: 'DELETE' });
+
+// ── 热度忽略规则（界面上管理，存 SQLite，立即生效）──
+
+export const fetchIgnoreRules = () => request<IgnoreRules>('/api/stats/ignore');
+
+export const addIgnoreRule = (useragent: string) =>
+  request<IgnoreRules>('/api/stats/ignore', {
+    method: 'POST',
+    body: JSON.stringify({ useragent }),
+  });
+
+/**
+ * 删一条**界面上的**规则。
+ *
+ * 用 DELETE + body 而不是把 UA 放进路径：规则里带 `/`（`regclient/regsync`），
+ * 走路径参数要依赖 %2F 的解码行为，不如放 body 里没有歧义。
+ */
+export const removeIgnoreRule = (useragent: string) =>
+  request<IgnoreRules>('/api/stats/ignore', {
+    method: 'DELETE',
+    body: JSON.stringify({ useragent }),
+  });

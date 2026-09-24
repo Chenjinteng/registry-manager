@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Alert,
   Button,
@@ -20,6 +20,8 @@ import {
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 
+import IgnoreRuleModal from '../components/ignore-rule-modal';
+
 import {
   fetchConfig,
   fetchStatsEvents,
@@ -32,6 +34,7 @@ import ContributionHeatmap from '../components/contribution-heatmap';
 import type {
   ApiResult,
   AppConfig,
+  IgnoreRules,
   StatsEventItem,
   StatsEvents,
   StatsSeriesPoint,
@@ -97,12 +100,42 @@ export default function StatsPage({ config, onConfigChange }: Props) {
   const [error, setError] = useState<ApiResult<unknown> | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   /**
+   * 「忽略这个客户端」的弹框。入口在「最近事件」每一行的「客户端」格子上 ——
+   * 你要排掉某个客户端时，人正看着那条 UA，不该被赶到设置页去手动粘一遍。
+   */
+  const [ignoreModal, setIgnoreModal] = useState<{ open: boolean; suggested: string }>({
+    open: false,
+    suggested: '',
+  });
+  /**
    * 榜单的滚动容器。这一页下方还有趋势与最近事件，页面本身仍会滚动，
    * 所以这里给表格一个高度上限（.table-scroll--bounded）而不是让它吃掉整个视口。
    */
   const topWrapRef = useRef<HTMLDivElement>(null);
 
   const statsEnabled = config?.statsEnabled === true;
+
+  /** 已经生效的规则（环境变量 ∪ 界面）。已经命中的客户端就不再给「忽略」入口。 */
+  const ignoreRules = config?.statsIgnoreUseragents ?? [];
+  const isIgnoredUa = (useragent: string) => {
+    const value = String(useragent ?? '').toLowerCase();
+    return value.length > 0 && ignoreRules.some((rule) => value.includes(rule.toLowerCase()));
+  };
+
+  /** 弹框里"会匹配到什么"的预览素材：当前缓冲里出现过的客户端。 */
+  const knownUseragents = useMemo(
+    () => [...new Set(events.map((event) => event.useragent).filter(Boolean))],
+    [events]
+  );
+
+  /** 保存规则后：立刻重拉事件（新规则当场就生效），并把生效规则同步回配置。 */
+  const handleIgnoreSaved = (rules: IgnoreRules) => {
+    setIgnoreModal({ open: false, suggested: '' });
+    if (config) {
+      onConfigChange({ ...config, statsIgnoreUseragents: rules.effective });
+    }
+    setReloadKey((key) => key + 1);
+  };
 
   // 配置由镜像列表页首屏拉取；直接进热度页（或刷新后停在热度页）时这里补一次。
   useEffect(() => {
@@ -299,12 +332,28 @@ export default function StatsPage({ config, onConfigChange }: Props) {
           `Host：${record.host || '—'}`,
           `账号：${record.actor || '（未认证）'}`,
         ].join('\n');
+        // 已经被某条规则命中的，就不再给入口 —— 重复加只会让人以为没生效。
+        const already = isIgnoredUa(record.useragent);
         return (
-          <Tooltip title={<span style={{ whiteSpace: 'pre-line' }}>{detail}</span>}>
-            <span className="mono ellipsis" style={{ display: 'block' }}>
-              {value || '—'}
-            </span>
-          </Tooltip>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <Tooltip title={<span style={{ whiteSpace: 'pre-line' }}>{detail}</span>}>
+              <span className="mono ellipsis" style={{ flex: '1 1 auto', minWidth: 0 }}>
+                {value || '—'}
+              </span>
+            </Tooltip>
+            {value && !already ? (
+              <Tooltip title="以后不再统计这个客户端的热度">
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ flex: 'none', padding: 0, height: 'auto' }}
+                  onClick={() => setIgnoreModal({ open: true, suggested: value.split(' ')[0] })}
+                >
+                  忽略
+                </Button>
+              </Tooltip>
+            ) : null}
+          </div>
         );
       },
     },
@@ -585,6 +634,14 @@ export default function StatsPage({ config, onConfigChange }: Props) {
             ),
           },
         ]}
+      />
+
+      <IgnoreRuleModal
+        open={ignoreModal.open}
+        suggested={ignoreModal.suggested}
+        knownUseragents={knownUseragents}
+        onCancel={() => setIgnoreModal({ open: false, suggested: '' })}
+        onSaved={handleIgnoreSaved}
       />
     </div>
   );

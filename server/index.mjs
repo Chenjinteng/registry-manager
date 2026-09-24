@@ -238,7 +238,9 @@ app.get('/api/config', (req, res) => {
        * 不计入热度的客户端 User-Agent 片段。下发出去是为了让使用者能**确认配置生效了** ——
        * 否则"热度不涨"和"配置没读到"看起来一模一样。
        */
-      statsIgnoreUseragents: config.statsIgnoreUseragents,
+      statsIgnoreUseragents: activityStore
+        ? activityStore.ignoreRules().effective
+        : config.statsIgnoreUseragents,
       /** 拉取历史的保留天数（与热度分开配置）。 */
       pullHistoryRetentionDays: config.pullHistoryRetentionDays,
     },
@@ -931,6 +933,83 @@ app.delete('/api/stats/heat', (req, res) => {
     });
   } catch (error) {
     fail(res, error);
+  }
+});
+
+/** 规则片段长度上限，与内存缓冲里 User-Agent 的截断长度一致：更长的规则永远匹配不到。 */
+const MAX_IGNORE_RULE_LENGTH = 200;
+
+/**
+ * 校验并规范化一条忽略规则。
+ *
+ * **空规则必须挡掉**：`''.includes` 恒为真，一条空规则会把所有事件都判成忽略、
+ * 热度直接归零。这里返回错误对象而不是抛，便于调用方给出准确的提示。
+ */
+function readIgnoreRule(body) {
+  const raw = typeof body?.useragent === 'string' ? body.useragent.trim() : '';
+  if (!raw) {
+    return { error: '规则不能为空。' };
+  }
+  if (raw.length > MAX_IGNORE_RULE_LENGTH) {
+    return { error: `规则最长 ${MAX_IGNORE_RULE_LENGTH} 个字符（User-Agent 在排查缓冲里也按这个长度截断）。` };
+  }
+  return { rule: raw };
+}
+
+/** 当前生效的忽略规则，按来源分开。界面据此标出"哪条来自环境变量、删不掉"。 */
+app.get('/api/stats/ignore', (req, res) => {
+  ok(res, {
+    data: activityStore
+      ? activityStore.ignoreRules()
+      : { env: config.statsIgnoreUseragents, panel: [], effective: config.statsIgnoreUseragents },
+  });
+});
+
+/**
+ * 加一条忽略规则。**存 SQLite，立即生效，不用重启** —— 这是它相对环境变量的全部意义：
+ * 你在「最近事件」里看到一条刷屏的 UA，当场就能排掉。
+ */
+app.post('/api/stats/ignore', (req, res) => {
+  if (!activityStore) {
+    fail(res, new RegistryError('热度统计未启用，无法保存规则。', 'STATS_DISABLED'));
+    return;
+  }
+  const { rule, error } = readIgnoreRule(req.body);
+  if (error) {
+    fail(res, new RegistryError(error, 'INVALID_IGNORE_RULE'));
+    return;
+  }
+  try {
+    const { added } = activityStore.addIgnoreRule(rule);
+    ok(res, {
+      data: activityStore.ignoreRules(),
+      // 已经存在时说清楚，不然用户会以为没保存上。
+      message: added ? `已忽略客户端 ${rule}` : `规则「${rule}」已经在了`,
+    });
+  } catch (error_) {
+    fail(res, error_);
+  }
+});
+
+/** 删一条**界面上的**规则。环境变量给的基线不在这里，删不到（界面上会标出来）。 */
+app.delete('/api/stats/ignore', (req, res) => {
+  if (!activityStore) {
+    fail(res, new RegistryError('热度统计未启用，无法删除规则。', 'STATS_DISABLED'));
+    return;
+  }
+  const { rule, error } = readIgnoreRule(req.body);
+  if (error) {
+    fail(res, new RegistryError(error, 'INVALID_IGNORE_RULE'));
+    return;
+  }
+  try {
+    const { removed } = activityStore.removeIgnoreRule(rule);
+    ok(res, {
+      data: activityStore.ignoreRules(),
+      message: removed ? `已不再忽略 ${rule}` : `没有找到规则「${rule}」`,
+    });
+  } catch (error_) {
+    fail(res, error_);
   }
 });
 

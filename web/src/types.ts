@@ -373,3 +373,18 @@ export interface HeatPurgeResult {
   /** 幂等去重记录数（`event_seen`）。 */
   seen: number;
 }
+
+/**
+ * 热度忽略规则，按来源分开。
+ *
+ * 两个来源**同时生效**（取并集）：
+ *  - `env`：环境变量 `REGISTRY_STATS_IGNORE_USERAGENTS` 给的，声明式部署用，**界面上删不掉**；
+ *  - `panel`：界面上加的，存 SQLite，增删立即生效、不用重启。
+ * 分开返回就是为了让设置页能标出"这条来自环境变量"，否则用户删了没反应时找不到原因。
+ */
+export interface IgnoreRules {
+  env: string[];
+  panel: string[];
+  /** 并集去重后的最终列表；判定与界面回显用的都是它。 */
+  effective: string[];
+}

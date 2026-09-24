@@ -116,7 +116,7 @@ docker compose up -d --build
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.7.2` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.8.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -127,7 +127,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.7.2 .
+docker build -t registry-manager:0.8.0 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -135,7 +135,7 @@ docker build -t registry-manager:0.7.2 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.7.2 .
+  -t registry-manager:0.8.0 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -146,7 +146,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.7.2 .
+  -t registry-manager:0.8.0 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -162,7 +162,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.7.2
+  registry-manager:0.8.0
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -188,8 +188,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.7.2 192.0.2.10:10001/example/registry-manager:0.7.2
-docker push 192.0.2.10:10001/example/registry-manager:0.7.2
+docker tag registry-manager:0.8.0 192.0.2.10:10001/example/registry-manager:0.8.0
+docker push 192.0.2.10:10001/example/registry-manager:0.8.0
 ```
 
 ### 镜像内置
@@ -637,22 +637,30 @@ registry 上常驻的同步工具（regsync、skopeo 之类）会**按点扫全�
 
 #### 怎么排
 
-0. **先把"自己人"认出来**：`registry-manager/…` 是本工具自己发的请求（重新扫描时按 tag
-   数量读 manifest 与 image config，一次几十上百条），`regclient/…`、`skopeo/…` 是同步工具，
-   `docker/…` 才是真人。本工具的自身请求**不列在面板里**，只在标题上显示「自身请求 N 条」。
-   （0.7.1 之前本工具没设 User-Agent，这些在 registry 侧显示成裸的 `undici`。）
 1. **先看清是谁**：热度页 →「最近事件」→ 展开 → 看「客户端」列。有没有一个 UA 整齐地
    刷满所有仓库？（也可以 `curl /api/stats/events?limit=50`）
-2. **把它的片段填进配置**，重启服务：
 
-   ```bash
-   # 逗号分隔；子串匹配、忽略大小写，所以不用带版本号
-   REGISTRY_STATS_IGNORE_USERAGENTS=regclient/regsync,skopeo
-   ```
+   顺手认一下常见的几个：
 
-   被忽略的事件**仍然留在「最近事件」里**，`reason` 标成 `IGNORED_USERAGENT:<命中的片段>` ——
-   这样"被排掉了"和"事件根本没到"才分得清。忽略规则生效时，面板标题上会挂一个
-   「已忽略：…」的标签，`/api/config` 里也能查到，不用猜配置有没有读到。
+   | UA | 是谁 |
+   | --- | --- |
+   | `docker/27.x … UpstreamClient(...)` | 真人 / CI |
+   | `regclient/regsync …`、`skopeo/…` | 镜像同步工具 |
+   | `registry-manager/…` | **本工具自己**（重新扫描时读 manifest 与 image config）。它不列在面板里，只在标题上显示「自身请求 N 条」 |
+
+2. **在那一行上直接点「忽略」**。弹框会预填规则片段（取 UA 的第一段），并**实时显示
+   会匹配到最近收到的哪几个客户端** —— 规则是子串匹配，写宽一点会误伤，先看清后果再保存。
+   **保存即生效，不用重启**。
+
+   被忽略的事件**仍然留在「最近事件」里**，`reason` 标成 `IGNORED_USERAGENT:<命中的片段>`，
+   这样"被排掉了"和"事件根本没到"才分得清。面板标题上会挂「已忽略：…」的标签。
+
+   规则也可以在 **设置页 →「热度忽略规则」** 里看全量与删除。那里会标出每条规则的来源：
+   界面上加的可以删；来自环境变量 `REGISTRY_STATS_IGNORE_USERAGENTS` 的是**声明式部署的基线**，
+   在界面上只读（服务端也删不动），与界面规则取并集。
+
+   > 为什么预填的是片段而不是完整 UA：存 `regclient/regsync (v0.11.5)` 的话，
+   > 对方升到 v0.12 规则就静默失效了。
 
 3. **清掉已经算歪的历史**：口径改正**只对以后生效** —— `activity_daily` 当初没留身份字段，
    追溯不回来。用 **设置页 → 清空热度数据** 清掉重新累计（只清热度聚合与幂等去重记录，

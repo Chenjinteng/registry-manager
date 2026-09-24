@@ -1,9 +1,18 @@
-import { useState } from 'react';
-import { Alert, App, Button, Descriptions, Space, Tag } from 'antd';
-import { ApiOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
+import { useEffect, useMemo, useState } from 'react';
+import { Alert, App, Button, Descriptions, Empty, Space, Table, Tag, Tooltip } from 'antd';
+import { ApiOutlined, DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import type { ColumnsType } from 'antd/es/table';
 
-import { probeRegistry, purgeHeat, refreshInventory } from '../api';
-import type { ApiResult, AppConfig, Inventory } from '../types';
+import {
+  fetchIgnoreRules,
+  fetchStatsEvents,
+  probeRegistry,
+  purgeHeat,
+  refreshInventory,
+  removeIgnoreRule,
+} from '../api';
+import IgnoreRuleModal from '../components/ignore-rule-modal';
+import type { ApiResult, AppConfig, IgnoreRules, Inventory } from '../types';
 import { formatDateTime } from '../utils';
 
 interface Props {
@@ -13,11 +22,15 @@ interface Props {
   onInventoryChange: (inventory: Inventory) => void;
 }
 
-export default function SettingsPage({ config, inventory, onInventoryChange }: Props) {
+export default function SettingsPage({ config, onConfigChange, inventory, onInventoryChange }: Props) {
   const { message, modal } = App.useApp();
   const [probing, setProbing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [purging, setPurging] = useState(false);
+  const [ignoreRules, setIgnoreRules] = useState<IgnoreRules | null>(null);
+  const [ignoreModalOpen, setIgnoreModalOpen] = useState(false);
+  /** 预览素材：最近收到的客户端。进这一页时取一次即可。 */
+  const [knownUseragents, setKnownUseragents] = useState<string[]>([]);
   const [notice, setNotice] = useState<ApiResult<unknown> | null>(null);
 
   const handleProbe = async () => {
@@ -49,6 +62,103 @@ export default function SettingsPage({ config, inventory, onInventoryChange }: P
       setRefreshing(false);
     }
   };
+
+  const statsEnabled = config?.statsEnabled === true;
+
+  // 规则与预览素材各取一次。热度不可用时服务端会回空结构，不用单独降级。
+  useEffect(() => {
+    if (!statsEnabled) {
+      return;
+    }
+    void (async () => {
+      const [rules, events] = await Promise.all([fetchIgnoreRules(), fetchStatsEvents(50)]);
+      if (rules.success && rules.data) {
+        setIgnoreRules(rules.data);
+      }
+      if (events.success && events.data) {
+        setKnownUseragents([
+          ...new Set(events.data.items.map((event) => event.useragent).filter(Boolean)),
+        ]);
+      }
+    })();
+  }, [statsEnabled]);
+
+  /** 规则表：环境变量来的标出来、不给删；界面加的可以删。 */
+  const ruleRows = useMemo(() => {
+    const env = (ignoreRules?.env ?? []).map((rule) => ({ key: `env:${rule}`, rule, source: 'env' as const }));
+    const panel = (ignoreRules?.panel ?? []).map((rule) => ({ key: `panel:${rule}`, rule, source: 'panel' as const }));
+    return [...env, ...panel];
+  }, [ignoreRules]);
+
+  /** 生效规则同步回顶层配置，热度页标题上的「已忽略：…」才不会滞后。 */
+  const applyRules = (rules: IgnoreRules) => {
+    setIgnoreRules(rules);
+    if (config) {
+      onConfigChange({ ...config, statsIgnoreUseragents: rules.effective });
+    }
+  };
+
+  const handleRemoveRule = async (rule: string) => {
+    const result = await removeIgnoreRule(rule);
+    if (result.success && result.data) {
+      message.success(result.message || '已删除规则');
+      applyRules(result.data);
+    } else {
+      setNotice(result);
+    }
+  };
+
+  const ruleColumns: ColumnsType<{ key: string; rule: string; source: 'env' | 'panel' }> = [
+    {
+      title: '规则片段',
+      dataIndex: 'rule',
+      key: 'rule',
+      ellipsis: { showTitle: false },
+      render: (value: string) => (
+        <Tooltip title={value}>
+          <span className="mono ellipsis" style={{ display: 'block' }}>
+            {value}
+          </span>
+        </Tooltip>
+      ),
+    },
+    {
+      title: '来源',
+      dataIndex: 'source',
+      key: 'source',
+      width: 150,
+      render: (source: 'env' | 'panel') =>
+        source === 'env' ? (
+          <Tooltip title="来自环境变量 REGISTRY_STATS_IGNORE_USERAGENTS，要改得改部署配置并重启">
+            <Tag color="gold" style={{ marginInlineEnd: 0 }}>
+              环境变量
+            </Tag>
+          </Tooltip>
+        ) : (
+          <Tag style={{ marginInlineEnd: 0 }}>界面</Tag>
+        ),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 90,
+      render: (_, record) =>
+        record.source === 'panel' ? (
+          <Button
+            type="link"
+            size="small"
+            danger
+            style={{ padding: 0, height: 'auto' }}
+            onClick={() => void handleRemoveRule(record.rule)}
+          >
+            删除
+          </Button>
+        ) : (
+          // 说清楚为什么这里没有删除按钮，否则会被当成 bug。
+          <span style={{ color: 'var(--color-text-4)', fontSize: 12 }}>不可在此删除</span>
+        ),
+    },
+  ];
 
   const handlePurgeHeat = async () => {
     setPurging(true);
@@ -170,6 +280,35 @@ PORT=8787 pnpm start
         }
       />
 
+      {/*
+        规则管理放这里，但**添加的主要入口在热度页那一行上** —— 要排掉某个客户端时人正看着
+        那条 UA，不该被赶到设置页来手动粘。这里负责"看全量 + 删 + 标出来源"。
+      */}
+      {statsEnabled ? (
+        <div className="panel" style={{ padding: 16 }}>
+          <div className="stats-panel-head">
+            <h3 className="stats-panel-title">热度忽略规则</h3>
+            <Button size="small" icon={<PlusOutlined />} onClick={() => setIgnoreModalOpen(true)}>
+              添加规则
+            </Button>
+          </div>
+          <p style={{ margin: '0 0 12px', color: 'var(--color-text-3)', fontSize: 13 }}>
+            命中的客户端不计入热度（子串匹配、忽略大小写）。加规则不用重启 ——
+            嫌麻烦的话，热度页「最近事件」每一行的「忽略」是最快的入口。
+          </p>
+          <Table
+            rowKey="key"
+            size="small"
+            columns={ruleColumns}
+            dataSource={ruleRows}
+            pagination={false}
+            locale={{
+              emptyText: <Empty description="还没有规则：所有客户端的事件都会计入热度" />,
+            }}
+          />
+        </div>
+      ) : null}
+
       {config?.statsEnabled ? (
         <Alert
           type="info"
@@ -240,6 +379,16 @@ PORT=8787 pnpm start
             )}
           </div>
         }
+      />
+
+      <IgnoreRuleModal
+        open={ignoreModalOpen}
+        knownUseragents={knownUseragents}
+        onCancel={() => setIgnoreModalOpen(false)}
+        onSaved={(rules) => {
+          setIgnoreModalOpen(false);
+          applyRules(rules);
+        }}
       />
     </div>
   );

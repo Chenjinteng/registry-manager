@@ -80,7 +80,16 @@ export function matchIgnoredUseragent(useragent, patterns) {
   if (!ua) {
     return '';
   }
-  return (patterns ?? []).find((pattern) => ua.includes(String(pattern).toLowerCase())) ?? '';
+  /*
+   * 空片段必须显式跳过：`''.includes` 恒为真，一个手滑写进去的空规则会把**所有**事件
+   * 都判成忽略、热度直接归零。这里挡一道，比指望每个调用方都校验更可靠。
+   */
+  return (
+    (patterns ?? []).find((pattern) => {
+      const needle = String(pattern ?? '').trim().toLowerCase();
+      return needle.length > 0 && ua.includes(needle);
+    }) ?? ''
+  );
 }
 
 /**
@@ -191,6 +200,11 @@ export class ActivityStore {
   #bufferSize;
   #retentionDays;
   #dedupDays;
+  /** 环境变量给的基线规则（只读，界面上删不掉）。 */
+  #envUseragents;
+  /** 界面上加的规则（存 SQLite，可增删）。 */
+  #panelUseragents;
+  /** 上面两者的并集，判定时用它。增删规则后立即重算，**不需要重启**。 */
   #ignoreUseragents;
   #accepted = 0;
   #rejected = 0;
@@ -216,9 +230,67 @@ export class ActivityStore {
     this.#retentionDays = retentionDays;
     this.#dedupDays = dedupDays;
     this.#bufferSize = bufferSize;
-    this.#ignoreUseragents = ignoreUseragents;
+    /*
+     * 规则有两个来源，判定时**取并集**：
+     *   - 环境变量 `REGISTRY_STATS_IGNORE_USERAGENTS`：声明式部署用，只读；
+     *   - 界面（存 SQLite）：日常入口，可随时增删、**立即生效不用重启**。
+     * 分开存是为了能在界面上标出"这条来自环境变量、在这里删不掉" ——
+     * 混成一条列表的话，用户删了没反应时根本不知道去哪找。
+     */
+    this.#envUseragents = [...ignoreUseragents];
+    this.#panelUseragents = db.listIgnoredClients().map((r) => r.useragent);
+    this.#refreshIgnoreRules();
     // 启动时先清一次，避免保留期改小后旧数据一直留着。
     this.cleanup();
+  }
+
+  /** 环境变量给的基线 + 界面加的，去重（忽略大小写，与匹配口径一致）。 */
+  #refreshIgnoreRules() {
+    const seen = new Set();
+    const merged = [];
+    for (const rule of [...this.#envUseragents, ...this.#panelUseragents]) {
+      const key = String(rule ?? '').trim().toLowerCase();
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(String(rule).trim());
+    }
+    this.#ignoreUseragents = merged;
+  }
+
+  /**
+   * 当前生效的规则，以及每条的来源。
+   *
+   * 界面要知道"哪些是环境变量给的" —— 那些在设置页里只能看、不能删。
+   */
+  ignoreRules() {
+    return {
+      env: [...this.#envUseragents],
+      panel: [...this.#panelUseragents],
+      /** 并集去重后的最终列表；判定与界面回显用的都是它。 */
+      effective: [...this.#ignoreUseragents],
+    };
+  }
+
+  /** 加一条界面规则。已存在（忽略大小写）时 added=false。 */
+  addIgnoreRule(useragent, at = new Date().toISOString()) {
+    const result = this.#db.addIgnoredClient(String(useragent).trim(), at);
+    if (result.added) {
+      this.#panelUseragents = this.#db.listIgnoredClients().map((r) => r.useragent);
+      this.#refreshIgnoreRules();
+    }
+    return result;
+  }
+
+  /** 删一条界面规则。环境变量给的那些不在这里，删不到。 */
+  removeIgnoreRule(useragent) {
+    const result = this.#db.removeIgnoredClient(String(useragent).trim());
+    if (result.removed) {
+      this.#panelUseragents = this.#db.listIgnoredClients().map((r) => r.useragent);
+      this.#refreshIgnoreRules();
+    }
+    return result;
   }
 
   /**

@@ -83,7 +83,7 @@ const terminalJob = (over = {}) => ({
     return { version, tables };
   };
 
-  check('老库（user_version=1）升级后版本变成 2', inspect().version === 2, String(inspect().version));
+  check('老库（user_version=1）一路升到当前版本', inspect().version === 3, String(inspect().version));
   check(
     '升级后原有的热度数据一条没丢',
     upgraded.summary({ days: 3650 }).total === 7,
@@ -98,7 +98,69 @@ const terminalJob = (over = {}) => ({
   // 迁移后新表要能正常用
   upgraded.recordPullJob(terminalJob({ id: 'after-upgrade' }));
   check('升级后立刻就能写入拉取历史', upgraded.getPullJob('after-upgrade')?.id === 'after-upgrade');
+  check('升级后补出了忽略规则表（v3）', inspect().tables.includes('ignored_clients'), inspect().tables.join(','));
+  /*
+   * v1 → v3 是**跨两步**升上来的（v1→v2→v3）。逐版本迁移最容易在这里出错：
+   * 中间某一步被 `return` 掉、或者只有一步用了 `current === N` 判断，都会少建表。
+   */
+  check(
+    '跨版本升级（v1→v3）两步都跑到了：拉取历史表与忽略规则表都在',
+    inspect().tables.includes('pull_jobs') && inspect().tables.includes('ignored_clients')
+  );
+  upgraded.addIgnoredClient('after-upgrade/1.0', iso(0));
+  check(
+    '升级后的库立刻就能写忽略规则',
+    upgraded.listIgnoredClients().some((r) => r.useragent === 'after-upgrade/1.0'),
+    JSON.stringify(upgraded.listIgnoredClients())
+  );
   upgraded.close();
+}
+
+// ───────────────────── 一点五、迁移：v2 库（有热度 + 拉取历史）升到 v3 ─────────────────────
+{
+  const v2File = join(dir, 'legacy-v2.db');
+  {
+    // 造一个 v2 库：热度、去重、拉取历史都有数据，唯独没有 ignored_clients。
+    const raw = new DatabaseSync(v2File);
+    raw.exec('PRAGMA journal_mode = WAL');
+    raw.exec(`
+      CREATE TABLE activity_daily(
+        day TEXT NOT NULL, repository TEXT NOT NULL, tag TEXT NOT NULL, action TEXT NOT NULL,
+        events INTEGER NOT NULL DEFAULT 0, last_at TEXT NOT NULL,
+        PRIMARY KEY(day, repository, tag, action)) WITHOUT ROWID;
+      CREATE TABLE event_seen(id TEXT PRIMARY KEY, seen_at TEXT NOT NULL) WITHOUT ROWID;
+      CREATE TABLE pull_jobs(
+        id TEXT PRIMARY KEY, source_url TEXT NOT NULL, source_ref TEXT NOT NULL,
+        source_repo TEXT NOT NULL, source_tag TEXT NOT NULL, dest_repo TEXT NOT NULL,
+        dest_tag TEXT NOT NULL, status TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0,
+        total_bytes INTEGER, final_digest TEXT, error_code TEXT, error_message TEXT,
+        error_origin TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT NOT NULL,
+        phases TEXT) WITHOUT ROWID;
+      INSERT INTO activity_daily VALUES ('2026-09-21', 'redis', '7', 'push', 3, '2026-09-21T00:00:00.000Z');
+      PRAGMA user_version = 2;
+    `);
+    raw.close();
+  }
+
+  const upgradedV2 = new Db({ filePath: v2File });
+  check(
+    'v2 → v3：原有的热度数据一条没丢',
+    upgradedV2.summary({ days: 3650 }).total === 3,
+    JSON.stringify(upgradedV2.summary({ days: 3650 }))
+  );
+  check('v2 → v3：忽略规则表是空的（不是"迁移时顺手塞规则"）', upgradedV2.listIgnoredClients().length === 0);
+  upgradedV2.addIgnoredClient('v2-upgraded/1.0', iso(0));
+  check('v2 → v3：升级后立刻能写规则', upgradedV2.listIgnoredClients().length === 1);
+  check(
+    'v2 → v3：没有被"重建表"（老的热度行还在，不可能被清）',
+    (() => {
+      const raw = new DatabaseSync(v2File);
+      const row = raw.prepare("SELECT events FROM activity_daily WHERE repository='redis'").get();
+      raw.close();
+      return Number(row?.events) === 3;
+    })()
+  );
+  upgradedV2.close();
 }
 
 // ───────────────────── 二、只记终态 ─────────────────────

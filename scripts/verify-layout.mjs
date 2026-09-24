@@ -436,6 +436,64 @@ try {
       !ignoredCfg?.length || Boolean(panelHeader?.includes('已忽略')),
       JSON.stringify({ 配置: ignoredCfg, 标题: panelHeader?.slice(0, 100) })
     );
+    /*
+     * 「忽略」入口必须在**那一行上**。
+     *
+     * 这是这一轮的设计决定：要排掉某个客户端时，人正站在「最近事件」前面看着那条 UA，
+     * 「复制 UA → 去设置页 → 粘进表单 → 保存」是把人从问题现场赶到别处去。
+     * 浏览器里点一遍才能确认按钮真的渲染出来了、弹框真的挂上了（Modal 是运行时创建的）。
+     */
+    const ignoreEntry = await evaluate(`(() => {
+      const header = [...document.querySelectorAll('.ant-collapse-header')]
+        .find((h) => h.innerText.includes('最近事件'));
+      const item = header?.closest('.ant-collapse-item');
+      const btn = [...(item?.querySelectorAll('button') ?? [])]
+        .find((b) => b.innerText.trim() === '忽略');
+      if (!btn) return { found: false };
+      btn.click();
+      return { found: true };
+    })()`);
+    await sleep(700);
+    if (ignoreEntry.found) {
+      const ignoreDialog = await evaluate(`(() => {
+        const modal = document.querySelector('.ant-modal-content');
+        if (!modal) return null;
+        return {
+          title: modal.querySelector('.ant-modal-title')?.innerText.trim() ?? '',
+          draft: modal.querySelector('input')?.value ?? '',
+          body: (modal.innerText || '').replace(/\\s+/g, ' '),
+        };
+      })()`);
+      check(
+        '「最近事件」那一行上就有「忽略」入口（不必跑去设置页手动粘 UA）',
+        Boolean(ignoreDialog?.title),
+        JSON.stringify({ title: ignoreDialog?.title })
+      );
+      check(
+        '弹框预填的是**片段**而不是完整 UA（存完整 UA 的话对方升版本规则就失效了）',
+        Boolean(ignoreDialog?.draft) && !ignoreDialog.draft.includes('('),
+        JSON.stringify(ignoreDialog?.draft)
+      );
+      check(
+        '弹框里有"会匹配到什么"的实时预览',
+        Boolean(ignoreDialog?.body?.includes('客户端')),
+        ignoreDialog?.body?.slice(0, 80)
+      );
+      console.log('   截图:', await shot('layout-ignore-modal'));
+      // 点取消，别把规则真加进开发库。
+      await evaluate(
+        `[...document.querySelectorAll('.ant-modal-content .ant-btn')]
+          .find((b) => b.innerText.replace(/\\s+/g, '') === '取消')?.click()`
+      );
+      await sleep(600);
+      check(
+        '点「取消」后弹框关闭、什么也没加',
+        (await evaluate(`!document.querySelector('.ant-modal-content')`)) === true
+      );
+    } else {
+      skip('「忽略」入口', '当前缓冲里没有可忽略的客户端（可能都被规则命中了）');
+    }
+
     // 截图前先把它滚进视野：这个面板在页面最底部，不滚的话截到的是 Top 榜单。
     await evaluate(
       `[...document.querySelectorAll('.ant-collapse-header')].find((h) => h.innerText.includes('最近事件'))?.scrollIntoView({ block: 'center' })`
@@ -711,6 +769,41 @@ try {
     '点「取消」后确认框关闭',
     (await evaluate(`!document.querySelector('.ant-modal-confirm')`)) === true
   );
+
+  /*
+   * 设置页的规则管理：**"这条来自环境变量、在这里删不掉"必须看得见**。
+   * 这正是"env + 界面两个来源"最容易出误解的地方 —— 用户删了没反应，
+   * 如果界面上不写明来源，他只会认为按钮坏了。
+   */
+  const rulesPanel = await evaluate(`(() => {
+    const title = [...document.querySelectorAll('.stats-panel-title')]
+      .find((h) => h.innerText.includes('热度忽略规则'));
+    const panel = title?.closest('.panel');
+    if (!panel) return null;
+    return {
+      hasAdd: [...panel.querySelectorAll('button')].some((b) => b.innerText.includes('添加规则')),
+      rows: [...panel.querySelectorAll('tbody tr')].map((tr) => tr.innerText.replace(/\\s+/g, ' ').trim()),
+    };
+  })()`);
+  check('设置页有「热度忽略规则」面板', rulesPanel !== null, JSON.stringify(rulesPanel?.rows));
+  check('面板里有「添加规则」入口', rulesPanel?.hasAdd === true);
+
+  const envRules = await evaluate(
+    `fetch('/api/stats/ignore').then((r) => r.json()).then((j) => j.data.env)`
+  );
+  check(
+    '环境变量给的规则被标成「环境变量」、并注明不可在此删除',
+    !envRules?.length ||
+      (rulesPanel.rows.some((row) => row.includes('环境变量')) &&
+        rulesPanel.rows.some((row) => row.includes('不可在此删除'))),
+    JSON.stringify({ envRules, rows: rulesPanel?.rows })
+  );
+  await evaluate(
+    `[...document.querySelectorAll('.stats-panel-title')]
+      .find((h) => h.innerText.includes('热度忽略规则'))?.scrollIntoView({ block: 'center' })`
+  );
+  await sleep(400);
+  console.log('   截图:', await shot('layout-settings-rules'));
 } finally {
   ws.close();
   cleanup();
