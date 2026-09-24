@@ -593,9 +593,9 @@ export default function StatsPage({ config, onConfigChange }: Props) {
                   把这张表冲成自己的噪音 —— 真正要查的东西反而看不见了。
                 */}
                 {eventTotals?.self ? (
-                  <Tooltip title="服务端自己发往 registry 的请求（例如重新扫描时的 manifest 与 config 读取）。它们不反映外部使用，因此不列在下方。">
+                  <Tooltip title="服务端自己发往 registry 的读取请求（重新扫描时按 tag 读 manifest 与 image config，一次上百条）。它们永远不计入热度，纯噪音，所以折叠成一个数字。注意：服务端自己**计入热度**的那些（用「镜像拉取」搬进来的 manifest）照常列在下方。">
                     <span style={{ fontSize: 12, color: 'var(--color-text-4)' }}>
-                      自身请求 {eventTotals.self} 条
+                      自身读取 {eventTotals.self} 条
                     </span>
                   </Tooltip>
                 ) : null}

@@ -330,27 +330,38 @@ export class ActivityStore {
       };
 
       /*
-       * 本工具自己发的请求（见 SELF_USERAGENT_PREFIX）：不进缓冲、也不进面板计数。
-       * 注意 `result.*` 是**这次接收的真实账**（改的是"事件到底被怎么处理了"），
-       * 与缓冲无关，所以它照常统计；被排除的只有面板那两个数。
+       * 本工具自己发的请求（见 SELF_USERAGENT_PREFIX）里，**只折叠"不计入"的那些**。
+       *
+       * 两类自身请求性质完全不同，早先把它们一并折叠是个错误：
+       *   - 盘点读 manifest / config blob：一次上百条，永远不计入 → 纯噪音，折叠；
+       *   - 拉取任务落目的端 manifest（PUT）：**它改了热度**，而每个 tag 只有一条
+       *     → 必须留在面板里。挡掉它的后果是"用工具拉了个镜像，热度 +1 但面板里
+       *     一条记录都没有"，于是"热度为什么变了"根本查不出来。
+       *
+       * `result.*` 是这次接收的真实账，与折叠无关，照常统计。
        */
       const self = base.useragent.startsWith(SELF_USERAGENT_PREFIX);
+      const folded = self && !verdict.counted;
 
       if (!verdict.counted) {
         result.skipped += 1;
-        if (!self) {
+        if (folded) {
+          this.#self += 1;
+        } else {
           this.#rejected += 1;
         }
-        this.#push({ ...base, counted: false }, self);
+        this.#push({ ...base, counted: false }, folded);
         continue;
       }
       if (!base.id) {
         // 没有 id 就无法幂等，宁可丢弃也不冒重复计数的风险。
         result.skipped += 1;
-        if (!self) {
+        if (folded) {
+          this.#self += 1;
+        } else {
           this.#rejected += 1;
         }
-        this.#push({ ...base, counted: false, reason: 'NO_EVENT_ID' }, self);
+        this.#push({ ...base, counted: false, reason: 'NO_EVENT_ID' }, folded);
         continue;
       }
 
@@ -364,15 +375,13 @@ export class ActivityStore {
       });
       if (accepted) {
         result.accepted += 1;
-        if (!self) {
-          this.#accepted += 1;
-        }
-        this.#push({ ...base, counted: true }, self);
+        this.#accepted += 1;
+        this.#push({ ...base, counted: true }, folded);
       } else {
         // registry 的重试会把同一个事件再投一次。这不是错误，但要和"被过滤掉了"区分开，
         // 否则排查面板上会出现一条 reason=OK 却 counted=false 的迷惑记录。
         result.duplicates += 1;
-        this.#push({ ...base, counted: false, reason: 'DUPLICATE' }, self);
+        this.#push({ ...base, counted: false, reason: 'DUPLICATE' }, folded);
       }
     }
     return result;
@@ -381,14 +390,12 @@ export class ActivityStore {
   /**
    * 往排查缓冲里放一条。
    *
-   * `self` 为真表示这是本工具自己发的请求：只累加计数、不进缓冲
-   * （理由见 `SELF_USERAGENT_PREFIX` —— 一次盘点就能把缓冲冲干净）。
-   * 它也**不算进 accepted / rejected**：那两个数用来和下面那张表对账，
-   * 自身请求既然不在表里，就不该出现在这两个数里，否则界面上的数字和行数对不上。
+   * `folded` 为真表示这条要折叠掉（只有一种情况：**不计入的**自身请求，
+   * 也就是盘点那一百多条读请求，理由见 `SELF_USERAGENT_PREFIX`）。
+   * 它在调用方已经累加过 `#self`，这里只管不进缓冲。
    */
-  #push(item, self = false) {
-    if (self) {
-      this.#self += 1;
+  #push(item, folded = false) {
+    if (folded) {
       return;
     }
     this.#buffer.push(item);
@@ -409,7 +416,7 @@ export class ActivityStore {
       accepted: this.#accepted,
       rejected: this.#rejected,
       buffered: this.#buffer.length,
-      /** 本工具自己发的请求条数；**不计入 accepted / rejected**，也不在缓冲里。 */
+      /** 被折叠的自身请求条数（不计入的那些，主要是盘点的读请求）；不在 accepted / rejected 里，也不在缓冲里。 */
       self: this.#self,
     };
   }

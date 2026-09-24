@@ -896,7 +896,6 @@ store.close();
    * 关键的一条：自身请求**照常参与口径判定与计数**。
    * 拉取任务往本仓库写 manifest 时用的就是我们自己的 UA（PUT）——
    * 如果因为"是自己发的"就不计数，热度会凭空少算真实发生过的 push。
-   * 这一轮只改"进不进排查面板"，**不改计数语义**。
    */
   const selfPush = manifestEvent({ repository: 'self-pushed', action: 'push', method: 'PUT', tag: 'v1' });
   selfPush.request.useragent = `${SELF_USERAGENT_PREFIX}0.7.1`;
@@ -907,6 +906,33 @@ store.close();
     pushResult.accepted === 1 &&
       pushedTop.some((row) => row.repository === 'self-pushed' && row.push === 1),
     JSON.stringify({ result: pushResult, top: pushedTop.map((r) => `${r.repository}:${r.push}`) })
+  );
+  /*
+   * 而且它必须**看得见**。
+   *
+   * 真实反馈：用户用「镜像拉取」搬了一个镜像，热度确实 +1，但「最近事件」里一条记录都没有
+   * —— 因为早先把"自身请求"整类折叠了，把这类**改了热度**的事件也一起挡掉了，
+   * 于是"热度为什么变了"根本查不出来。
+   * 折叠的判据必须是"**不计入**的自身请求"，不是"自身请求"。
+   */
+  const panelRows = selfStore.recentEvents(50);
+  check(
+    '计入热度的自身请求必须留在排查面板里（它是"热度为什么变了"的答案）',
+    panelRows.some((e) => e.repository === 'self-pushed' && e.counted === true),
+    JSON.stringify(panelRows.map((e) => `${e.repository}:${e.counted}`))
+  );
+  check(
+    '折叠计数只统计被折叠的那些（计入的自身请求不算进去）',
+    selfStore.totals().self === 120,
+    JSON.stringify(selfStore.totals())
+  );
+  check(
+    '面板的「计入」与表里 counted 的行数一致（数字要对得上）',
+    selfStore.totals().accepted === panelRows.filter((e) => e.counted).length,
+    JSON.stringify({
+      accepted: selfStore.totals().accepted,
+      countedRows: panelRows.filter((e) => e.counted).length,
+    })
   );
 
   selfStore.close();

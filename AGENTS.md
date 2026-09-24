@@ -225,8 +225,12 @@ SQL 全部集中在 `server/db.mjs`（类名就叫 `Db`）。**不要**因此往
     （`streamBlobToDest` 的上传会话 PATCH、`putDestManifest` 的目的端 PUT）。
     0.7.1 就漏了这两条 —— 只要用一次「镜像拉取」就会在 registry 侧又冒出 `undici`，
     而且不会被算进"自身请求"。`verify:stats` 里那条断言把三条都跑到了。
-  - 接收端按 `SELF_USERAGENT_PREFIX` 认定自身请求：**不进排查缓冲、不计入面板的
-    计入/未计入**，只累加 `totals().self` 并在面板上显示条数。
+  - 接收端按 `SELF_USERAGENT_PREFIX` 认定自身请求，**但只折叠"不计入"的那些**：
+    盘点读 manifest/blob（一次上百条、永远不计入）折叠成 `totals().self` 一个数字；
+    而**计入热度的自身请求（拉取任务落目的端 manifest 的 PUT）必须留在面板里**。
+    ⚠️ 早先把"自身请求"整类折叠是个错误：用户用「镜像拉取」搬了镜像、热度确实 +1，
+    但面板里一条都没有 —— "热度为什么变了"当场就查不出来了。
+    折叠的判据是"**`self && !counted`**"，不是"`self`"。
   - **计数语义不受影响**：自身请求照常走 `classifyEvent`。盘点读 GET manifest 与 blob
     本来就不计入；拉取任务往本仓库写 manifest（PUT）**仍然计入** —— 那是真实发生过的 push。
     要连它一起排除，就把 `registry-manager` 加进 `REGISTRY_STATS_IGNORE_USERAGENTS`。
