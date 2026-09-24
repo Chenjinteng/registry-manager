@@ -903,7 +903,7 @@ app.get('/api/stats/events', (req, res) => {
   ok(res, {
     data: {
       items: activityStore ? activityStore.recentEvents(limit) : [],
-      totals: activityStore ? activityStore.totals() : { accepted: 0, rejected: 0, buffered: 0 },
+      totals: activityStore ? activityStore.totals() : { accepted: 0, rejected: 0, buffered: 0, self: 0 },
     },
   });
 });

@@ -116,7 +116,7 @@ docker compose up -d --build
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.7.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.7.1` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -127,7 +127,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.7.0 .
+docker build -t registry-manager:0.7.1 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -135,7 +135,7 @@ docker build -t registry-manager:0.7.0 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.7.0 .
+  -t registry-manager:0.7.1 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -146,7 +146,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.7.0 .
+  -t registry-manager:0.7.1 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -162,7 +162,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.7.0
+  registry-manager:0.7.1
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -188,8 +188,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.7.0 192.0.2.10:10001/example/registry-manager:0.7.0
-docker push 192.0.2.10:10001/example/registry-manager:0.7.0
+docker tag registry-manager:0.7.1 192.0.2.10:10001/example/registry-manager:0.7.1
+docker push 192.0.2.10:10001/example/registry-manager:0.7.1
 ```
 
 ### 镜像内置
@@ -637,6 +637,10 @@ registry 上常驻的同步工具（regsync、skopeo 之类）会**按点扫全�
 
 #### 怎么排
 
+0. **先把"自己人"认出来**：`registry-manager/…` 是本工具自己发的请求（重新扫描时按 tag
+   数量读 manifest 与 image config，一次几十上百条），`regclient/…`、`skopeo/…` 是同步工具，
+   `docker/…` 才是真人。本工具的自身请求**不列在面板里**，只在标题上显示「自身请求 N 条」。
+   （0.7.1 之前本工具没设 User-Agent，这些在 registry 侧显示成裸的 `undici`。）
 1. **先看清是谁**：热度页 →「最近事件」→ 展开 → 看「客户端」列。有没有一个 UA 整齐地
    刷满所有仓库？（也可以 `curl /api/stats/events?limit=50`）
 2. **把它的片段填进配置**，重启服务：

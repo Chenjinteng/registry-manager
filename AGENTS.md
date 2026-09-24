@@ -193,6 +193,20 @@ SQL 全部集中在 `server/db.mjs`（类名就叫 `Db`）。**不要**因此往
   所以 `verify:stats` 三层都有断言（已验证：四环逐个回退都会有断言失败）。
 - 症状识别：自动化进程会把**每个 tag 的热度刷成同一个数**，且所有仓库的"最近活动"是
   同一个时刻。看到这种整齐度就别再怀疑是人了。
+- **看到 `"useragent": "undici"` 就是本工具自己。** 这是最容易被误判的一项 ——
+  真实发生过：用户 grep 事件看到 178 条 `undici` 来问"这是什么"。
+  undici 是 Node 内置的 HTTP 客户端；**一次「重新扫描」就会按 tag 数量产生一批事件**
+  （每个 tag 一次 manifest GET + 一次 image config blob GET，76 仓库 / 88 tag ≈ 178 条），
+  正好把 200 条的排查缓冲冲干净。所以：
+  - `registry-client.mjs` 的每次请求都带 `User-Agent: registry-manager/<版本>`
+    （`USER_AGENT` 常量）。**不要删** —— 删了就退回"认不出来"的状态。
+  - 接收端按 `SELF_USERAGENT_PREFIX` 认定自身请求：**不进排查缓冲、不计入面板的
+    计入/未计入**，只累加 `totals().self` 并在面板上显示条数。
+  - **计数语义不受影响**：自身请求照常走 `classifyEvent`。盘点读 GET manifest 与 blob
+    本来就不计入；拉取任务往本仓库写 manifest（PUT）**仍然计入** —— 那是真实发生过的 push。
+    要连它一起排除，就把 `registry-manager` 加进 `REGISTRY_STATS_IGNORE_USERAGENTS`。
+  - 加量/改量性能相关的地方别忘了这条：盘点的事件量与 tag 数成正比，
+    缓冲默认只有 200 条。
 - **清空热度（`purgeHeat`）刻意不碰 `pull_jobs`**：拉取历史是任务记录，不是统计口径的
   产物，两者保留期也是分开配的。同理 `cleanupPullJobs` 不碰 `activity_daily` ——
   **这两条边界都有断言钉住**，别顺手合并成一个 `clear()`。
@@ -354,7 +368,9 @@ pull 的内容下载（GET）不计入、push 时的 blob 探测不计入、同�
 去掉身份字段会有 4 项失败、`purgeHeat` 漏删去重窗口会有 2 项失败、
 `purge` 不清内存缓冲会有 1 项失败、删掉 `DELETE /api/stats/heat` 会有 2 项失败；
 去掉客户端排除会有 10 项失败、`ActivityStore` 不透传规则会有 5 项失败、
-`index.mjs` 不透传会有 3 项失败、逗号不拆分会有 4 项失败）。
+`index.mjs` 不透传会有 3 项失败、逗号不拆分会有 4 项失败；
+不设自己的 User-Agent 会有 1 项失败、自身请求照样进缓冲会有 2 项失败、
+自身请求也算进面板计数会有 1 项失败、"因为是自己发的就不计数"会有 1 项失败）。
 
 `scripts/verify-pull-history.mjs`（`pnpm verify:pull-history`）钉**拉取历史的存储契约**：
 **老库（user_version=1，只有热度）升级到 v2 不丢数据**、queued/running 不落库、

@@ -7,6 +7,20 @@
 import { ProxyAgent, fetch as undiciFetch } from 'undici';
 import { Readable, Transform } from 'node:stream';
 
+import { readAppVersion } from './config.mjs';
+
+/**
+ * 本工具自己的 User-Agent。
+ *
+ * **必须显式设置**：不设的话 undici 只会发一个 `undici`，于是我们自己的请求在
+ * registry 的事件里完全认不出来 —— 实测有人看到热度面板里 178 条 `undici`，
+ * 只能来问"这是什么"。那些其实是本工具一次「重新扫描」产生的请求
+ * （每个 tag 一次 manifest GET + 一次 image config blob GET）。
+ *
+ * 带上版本号，是为了将来能从 registry 侧的事件里分辨是哪一版在发请求。
+ */
+export const USER_AGENT = `registry-manager/${readAppVersion() || 'dev'}`;
+
 // 一次可接受的 manifest 类型；顺序即服务端优先级。
 const MANIFEST_ACCEPT = [
   'application/vnd.oci.image.index.v1+json',
@@ -198,7 +212,7 @@ export class RegistryClient {
     if (effectiveScope) {
       url.searchParams.set('scope', effectiveScope);
     }
-    const headers = { 'Cache-Control': 'no-cache' };
+    const headers = { 'Cache-Control': 'no-cache', 'User-Agent': USER_AGENT };
     // 私有仓库要用账号去换 token；匿名场景不带。
     if (this.authHeader) {
       headers.Authorization = this.authHeader;
@@ -248,7 +262,7 @@ export class RegistryClient {
     try {
       const response = await undiciFetch(`${this.baseUrl}/v2/`, {
         method: 'GET',
-        headers: { 'Cache-Control': 'no-cache' },
+        headers: { 'Cache-Control': 'no-cache', 'User-Agent': USER_AGENT },
         redirect: 'follow',
         signal,
         dispatcher: dispatcher ?? this.dispatcher,
@@ -284,7 +298,7 @@ export class RegistryClient {
         signal.addEventListener('abort', onAbort, { once: true });
       }
     }
-    const headers = { 'Cache-Control': 'no-cache' };
+    const headers = { 'Cache-Control': 'no-cache', 'User-Agent': USER_AGENT };
     if (accept) {
       headers.Accept = accept;
     }

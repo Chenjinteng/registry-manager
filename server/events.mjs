@@ -42,6 +42,22 @@ export const COUNTED_METHODS = new Set(['HEAD', 'PUT']);
 const DEFAULT_BUFFER_SIZE = 200;
 
 /**
+ * 本工具自己发的请求用的 User-Agent 前缀（与 `registry-client.mjs` 的 `USER_AGENT` 对应）。
+ *
+ * 为什么要把它们单独挑出来：**一次「重新扫描」就会产生 ≈ 2 × tag 数 条事件**
+ * （每个 tag 一次 manifest GET + 一次 image config blob GET）。实测一台 76 仓库 / 88 tag
+ * 的 registry，一次盘点就是 178 条 —— 正好把 200 条的排查缓冲冲干净，
+ * 用户看到的「最近事件」全是自己的噪音，真正要查的（例如同步工具的 UA）只剩 22 条。
+ *
+ * 所以自身请求**不进排查缓冲**，只单独计数并在面板上显示条数：
+ * 信息没被藏起来（"我扫过、产生了多少条"仍然看得到），但不会淹没真正的信号。
+ *
+ * 计数行为**不受影响** —— 自身请求照常走口径判定：盘点读的是 GET manifest 与 blob，
+ * 本来就不计入；拉取任务往本仓库写 manifest（PUT）仍然计入。
+ */
+export const SELF_USERAGENT_PREFIX = 'registry-manager/';
+
+/**
  * 截断成有界字符串。
  *
  * 这几个身份字段来自**外部输入**并且会进内存里的排查缓冲，不能让它无界增长
@@ -178,6 +194,8 @@ export class ActivityStore {
   #ignoreUseragents;
   #accepted = 0;
   #rejected = 0;
+  /** 本工具自己发的请求条数（不进缓冲，见 SELF_USERAGENT_PREFIX）。 */
+  #self = 0;
 
   /**
    * @param {object} opts
@@ -227,8 +245,8 @@ export class ActivityStore {
          * 客户端身份。热度被"某个自动化进程"刷高时（例如镜像同步工具按点扫全量），
          * 这几个字段是唯一能把它和真人区分开的线索，所以必须在排查缓冲里留着：
          *   - `useragent` 通常是最可靠的判据（`docker/27.x ...` vs `regclient/...`）；
-         *   - `addr` **实测在端口映射下是 Docker 网桥网关**（如 172.19.0.1），
-         *     不是真实客户端 —— 那种部署下它区分不了任何东西；
+         *   - `addr` **看场景**：客户端在别的机器上是真实 IP（可用），与 registry 同宿主时
+         *     才是 Docker 网桥网关（那时对所有人都是同一个值，区分不了任何东西）；
          *   - `host` 是客户端请求用的 Host 头，内网里常常全员相同；
          *   - `actor` 在**未开认证时是空的**，只有开了认证且用独立账号时才可用。
          */
@@ -239,17 +257,28 @@ export class ActivityStore {
         reason: verdict.reason,
       };
 
+      /*
+       * 本工具自己发的请求（见 SELF_USERAGENT_PREFIX）：不进缓冲、也不进面板计数。
+       * 注意 `result.*` 是**这次接收的真实账**（改的是"事件到底被怎么处理了"），
+       * 与缓冲无关，所以它照常统计；被排除的只有面板那两个数。
+       */
+      const self = base.useragent.startsWith(SELF_USERAGENT_PREFIX);
+
       if (!verdict.counted) {
         result.skipped += 1;
-        this.#rejected += 1;
-        this.#push({ ...base, counted: false });
+        if (!self) {
+          this.#rejected += 1;
+        }
+        this.#push({ ...base, counted: false }, self);
         continue;
       }
       if (!base.id) {
         // 没有 id 就无法幂等，宁可丢弃也不冒重复计数的风险。
         result.skipped += 1;
-        this.#rejected += 1;
-        this.#push({ ...base, counted: false, reason: 'NO_EVENT_ID' });
+        if (!self) {
+          this.#rejected += 1;
+        }
+        this.#push({ ...base, counted: false, reason: 'NO_EVENT_ID' }, self);
         continue;
       }
 
@@ -263,19 +292,33 @@ export class ActivityStore {
       });
       if (accepted) {
         result.accepted += 1;
-        this.#accepted += 1;
-        this.#push({ ...base, counted: true });
+        if (!self) {
+          this.#accepted += 1;
+        }
+        this.#push({ ...base, counted: true }, self);
       } else {
         // registry 的重试会把同一个事件再投一次。这不是错误，但要和"被过滤掉了"区分开，
         // 否则排查面板上会出现一条 reason=OK 却 counted=false 的迷惑记录。
         result.duplicates += 1;
-        this.#push({ ...base, counted: false, reason: 'DUPLICATE' });
+        this.#push({ ...base, counted: false, reason: 'DUPLICATE' }, self);
       }
     }
     return result;
   }
 
-  #push(item) {
+  /**
+   * 往排查缓冲里放一条。
+   *
+   * `self` 为真表示这是本工具自己发的请求：只累加计数、不进缓冲
+   * （理由见 `SELF_USERAGENT_PREFIX` —— 一次盘点就能把缓冲冲干净）。
+   * 它也**不算进 accepted / rejected**：那两个数用来和下面那张表对账，
+   * 自身请求既然不在表里，就不该出现在这两个数里，否则界面上的数字和行数对不上。
+   */
+  #push(item, self = false) {
+    if (self) {
+      this.#self += 1;
+      return;
+    }
     this.#buffer.push(item);
     if (this.#buffer.length > this.#bufferSize) {
       this.#buffer.splice(0, this.#buffer.length - this.#bufferSize);
@@ -290,7 +333,13 @@ export class ActivityStore {
 
   /** 接收端的累计计数，用于判断"到底有没有事件进来"。 */
   totals() {
-    return { accepted: this.#accepted, rejected: this.#rejected, buffered: this.#buffer.length };
+    return {
+      accepted: this.#accepted,
+      rejected: this.#rejected,
+      buffered: this.#buffer.length,
+      /** 本工具自己发的请求条数；**不计入 accepted / rejected**，也不在缓冲里。 */
+      self: this.#self,
+    };
   }
 
   summary(days) {
@@ -334,6 +383,7 @@ export class ActivityStore {
     this.#buffer.length = 0;
     this.#accepted = 0;
     this.#rejected = 0;
+    this.#self = 0;
     return removed;
   }
 

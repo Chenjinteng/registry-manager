@@ -353,7 +353,17 @@ export interface StatsEventItem {
 
 export interface StatsEvents {
   items: StatsEventItem[];
-  totals: { accepted: number; rejected: number; buffered: number };
+  totals: {
+    accepted: number;
+    rejected: number;
+    buffered: number;
+    /**
+     * 本工具自己发的请求条数（例如一次「重新扫描」会按 tag 数量产生一批）。
+     * **不在 accepted / rejected 里，也不在 items 里** —— 面板上单独显示一个数字，
+     * 否则它们会把排查用的缓冲冲干净（实测一次盘点 178 条，缓冲只有 200）。
+     */
+    self: number;
+  };
 }
 
 /** 清空热度数据的结果：删掉了多少行。 */

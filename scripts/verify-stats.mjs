@@ -19,11 +19,13 @@
  * 用法：node --disable-warning=ExperimentalWarning scripts/verify-stats.mjs
  */
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ActivityStore, classifyEvent, verifyNotifyToken } from '../server/events.mjs';
+import { ActivityStore, SELF_USERAGENT_PREFIX, classifyEvent, verifyNotifyToken } from '../server/events.mjs';
+import { RegistryClient, USER_AGENT } from '../server/registry-client.mjs';
 import { Db } from '../server/db.mjs';
 
 let failed = 0;
@@ -477,7 +479,7 @@ store.close();
   check('清空后热度归零', purgeStore.summary(30).total === 0, String(purgeStore.summary(30).total));
   check(
     '清空后累计计数与内存缓冲一起归零（否则面板还挂着旧事件，看着像没清成功）',
-    JSON.stringify(purgeStore.totals()) === JSON.stringify({ accepted: 0, rejected: 0, buffered: 0 }),
+    JSON.stringify(purgeStore.totals()) === JSON.stringify({ accepted: 0, rejected: 0, buffered: 0, self: 0 }),
     JSON.stringify(purgeStore.totals())
   );
 
@@ -696,6 +698,110 @@ store.close();
   proc.kill('SIGTERM');
   await new Promise((r) => setTimeout(r, 300));
   rmSync(httpDir, { recursive: true, force: true });
+}
+
+// ───────────────────── 十一、本工具自己的请求必须认得出来 ─────────────────────
+//
+// 起因（真实反馈）：用户在 registry 侧 grep 事件，看到 178 条 `"useragent": "undici"` 并来问
+// "这是什么"。undici 是 Node 内置的 HTTP 客户端 —— 也就是说那些**全是我们自己**发的请求，
+// 只是从来没设过 User-Agent，在 registry 眼里和任何一个 Node 脚本没有区别。
+//
+// 178 这个数也精确对得上：76 仓库 / 88 tag 的一次「重新扫描」= 88 次 manifest GET
+// + 88 次 image config blob GET ≈ 178 条事件 —— 正好把 200 条的排查缓冲冲干净。
+{
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push({ url: req.url, ua: req.headers['user-agent'] ?? '' });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ repositories: [] }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const probeClient = new RegistryClient({ url: `http://127.0.0.1:${port}` });
+    await probeClient.listRepositories();
+  } finally {
+    server.close();
+  }
+
+  check(
+    '本工具的请求带上自己的 User-Agent（不再是裸的 `undici`）',
+    seen.length > 0 && seen.every((r) => r.ua === USER_AGENT),
+    JSON.stringify(seen.slice(0, 2))
+  );
+  check(
+    'UA 形如 registry-manager/<版本>，且与接收端认定的"自身请求"前缀一致',
+    USER_AGENT.startsWith(SELF_USERAGENT_PREFIX) && /^registry-manager\/\d+\.\d+\.\d+/.test(USER_AGENT),
+    USER_AGENT
+  );
+}
+
+// ───────────────────── 十二、自身请求不冲掉排查缓冲，但照常计数 ─────────────────────
+{
+  const selfDir = mkdtempSync(join(tmpdir(), 'registry-manager-self-'));
+  const selfStore = new ActivityStore({
+    db: new Db({ filePath: join(selfDir, 'registry-manager.db') }),
+    retentionDays: 90,
+  });
+
+  // 模拟一次「重新扫描」：每个 tag 一次 manifest GET + 一次 image config blob GET，
+  // 方法与 UA 都跟真实路径一致。
+  const sweep = [];
+  for (let i = 0; i < 60; i += 1) {
+    const manifest = manifestEvent({ repository: `repo${i}`, action: 'pull', method: 'GET', tag: 'latest' });
+    manifest.request.useragent = `${SELF_USERAGENT_PREFIX}0.7.1`;
+    sweep.push(manifest);
+    const config = blobEvent({ repository: `repo${i}`, action: 'pull', method: 'GET' });
+    config.request.useragent = `${SELF_USERAGENT_PREFIX}0.7.1`;
+    sweep.push(config);
+  }
+  const selfResult = selfStore.ingest({ events: sweep });
+  check(
+    '自身请求照常被处理（这里全是 GET manifest 与 blob，所以一条都不计入）',
+    selfResult.accepted === 0 && selfResult.skipped === 120,
+    JSON.stringify(selfResult)
+  );
+  check(
+    '自身请求不进排查缓冲（一次盘点上百条，会把真正要查的挤掉）',
+    selfStore.recentEvents(200).length === 0,
+    String(selfStore.recentEvents(200).length)
+  );
+  check('但会单独计数、在面板上显示', selfStore.totals().self === 120, JSON.stringify(selfStore.totals()));
+  check(
+    '自身请求不计入面板的"计入 / 未计入"（否则界面上的数字与表里的行数对不上）',
+    selfStore.totals().accepted === 0 && selfStore.totals().rejected === 0,
+    JSON.stringify(selfStore.totals())
+  );
+
+  selfStore.ingest({
+    events: [manifestEvent({ repository: 'nginx', action: 'pull', method: 'HEAD', tag: '1.25' })],
+  });
+  check(
+    '外部客户端的事件仍然进缓冲（没有被自身请求的过滤误伤）',
+    selfStore.recentEvents(5).length === 1 && selfStore.recentEvents(5)[0].repository === 'nginx',
+    JSON.stringify(selfStore.recentEvents(5).map((e) => e.repository))
+  );
+  check('自身计数不受外部事件影响', selfStore.totals().self === 120, JSON.stringify(selfStore.totals()));
+
+  /*
+   * 关键的一条：自身请求**照常参与口径判定与计数**。
+   * 拉取任务往本仓库写 manifest 时用的就是我们自己的 UA（PUT）——
+   * 如果因为"是自己发的"就不计数，热度会凭空少算真实发生过的 push。
+   * 这一轮只改"进不进排查面板"，**不改计数语义**。
+   */
+  const selfPush = manifestEvent({ repository: 'self-pushed', action: 'push', method: 'PUT', tag: 'v1' });
+  selfPush.request.useragent = `${SELF_USERAGENT_PREFIX}0.7.1`;
+  const pushResult = selfStore.ingest({ events: [selfPush] });
+  const pushedTop = selfStore.top({ days: 30, limit: 10, by: 'repository' });
+  check(
+    '自身请求里的真实 push 仍然计入热度（计数语义没变）',
+    pushResult.accepted === 1 &&
+      pushedTop.some((row) => row.repository === 'self-pushed' && row.push === 1),
+    JSON.stringify({ result: pushResult, top: pushedTop.map((r) => `${r.repository}:${r.push}`) })
+  );
+
+  selfStore.close();
+  rmSync(selfDir, { recursive: true, force: true });
 }
 
 rmSync(dir, { recursive: true, force: true });

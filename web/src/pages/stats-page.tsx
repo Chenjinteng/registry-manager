@@ -539,6 +539,18 @@ export default function StatsPage({ config, onConfigChange }: Props) {
                   计入 {eventTotals?.accepted ?? 0} / 未计入 {eventTotals?.rejected ?? 0}
                 </span>
                 {/*
+                  服务端自身请求（它的 User-Agent 是 registry-manager/<版本>）单列一个数字。
+                  不列出来的话，一次「重新扫描」就会按 tag 数量产生一批事件（实测 178 条），
+                  把这张表冲成自己的噪音 —— 真正要查的东西反而看不见了。
+                */}
+                {eventTotals?.self ? (
+                  <Tooltip title="服务端自己发往 registry 的请求（例如重新扫描时的 manifest 与 config 读取）。它们不反映外部使用，因此不列在下方。">
+                    <span style={{ fontSize: 12, color: 'var(--color-text-4)' }}>
+                      自身请求 {eventTotals.self} 条
+                    </span>
+                  </Tooltip>
+                ) : null}
+                {/*
                   把"忽略了哪些客户端"写在这里，是为了让配置**看得见**：
                   否则"规则生效了所以热度不涨"和"规则没读到所以热度不涨"长得一样。
                   被忽略的事件仍然留在下面这张表里（reason 写着 IGNORED_USERAGENT），
