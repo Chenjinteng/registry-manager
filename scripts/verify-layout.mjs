@@ -423,6 +423,33 @@ try {
     );
     await sleep(400);
     console.log('   截图:', await shot('layout-stats-events'));
+
+    /*
+     * 加了「客户端」列之后，这一排列宽总和已经逼近容器宽度。
+     * 一旦超了就要横向滚动，而最右边的「是否计入」（写着未计入的原因，是排查的一半信息）
+     * 会被推出视野 —— 那就是"加了信息反而更难用"。
+     */
+    const panelLayout = await evaluate(`(() => {
+      const header = [...document.querySelectorAll('.ant-collapse-header')]
+        .find((h) => h.innerText.includes('最近事件'));
+      const item = header?.closest('.ant-collapse-item');
+      const body = item?.querySelector('.ant-table-body') || item?.querySelector('.ant-table-content');
+      if (!body) return null;
+      const th = [...item.querySelectorAll('thead th')].map((el) => ({
+        text: el.innerText.trim(),
+        width: Math.round(el.getBoundingClientRect().width),
+      }));
+      return { scrollWidth: body.scrollWidth, clientWidth: body.clientWidth, th };
+    })()`);
+    check(
+      '「最近事件」面板不需要横向滚动（否则最右边的「是否计入」会被推出视野）',
+      panelLayout !== null && panelLayout.scrollWidth <= panelLayout.clientWidth + 4,
+      JSON.stringify({
+        scrollWidth: panelLayout?.scrollWidth,
+        clientWidth: panelLayout?.clientWidth,
+        th: panelLayout?.th,
+      })
+    );
   } else {
     skip('热度页布局', '热度页没渲染出来（可能未启用热度统计）');
   }

@@ -17,7 +17,7 @@ services:
         #   docker compose build --build-arg HTTPS_PROXY=http://<host>:<port>
 
     # 要推到自己的 registry，在 .env 里把 IMAGE 改成带前缀的完整名
-    image: ${IMAGE:-registry-manager:0.6.0}
+    image: ${IMAGE:-registry-manager:0.6.1}
     container_name: registry-manager
     restart: unless-stopped
 

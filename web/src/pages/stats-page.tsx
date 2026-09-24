@@ -249,7 +249,15 @@ export default function StatsPage({ config, onConfigChange }: Props) {
       title: 'mediaType',
       dataIndex: 'mediaType',
       key: 'mediaType',
-      width: 240,
+      width: 210,
+      /*
+       * `ellipsis` 必须写在**列**上，不能只靠单元格里那个 `.ellipsis` 类。
+       * 表格是 auto 布局（没有它 AntD 就不会切到 fixed），auto 布局下长且不可折行的
+       * 内容会把列撑到自身宽度、把 `width` 当摆设 —— 结果是整张表横向滚动，
+       * 最右边的「是否计入」被推出视野。实测：mediaType 声明 240 实际撑到 454。
+       * `showTitle: false` 是因为下面已经有内容更全的自定义 Tooltip，不要再来一个原生的。
+       */
+      ellipsis: { showTitle: false },
       render: (value: string) => (
         <Tooltip title={value || '—'}>
           <span className="mono ellipsis" style={{ display: 'block' }}>
@@ -262,6 +270,7 @@ export default function StatsPage({ config, onConfigChange }: Props) {
       title: '仓库',
       dataIndex: 'repository',
       key: 'repository',
+      ellipsis: { showTitle: false },
       render: (value: string) => (
         <Tooltip title={value || '—'}>
           <span className="ellipsis" style={{ display: 'block' }}>
@@ -275,7 +284,8 @@ export default function StatsPage({ config, onConfigChange }: Props) {
       title: '客户端',
       dataIndex: 'useragent',
       key: 'useragent',
-      width: 220,
+      width: 210,
+      ellipsis: { showTitle: false },
       /*
        * 排查"热度是不是被自动化进程刷高了"的关键一列：真人用 docker CLI，
        * 同步工具用 regclient / skopeo，User-Agent 一眼分得开。

@@ -247,6 +247,13 @@ node server/index.mjs
 - 结构：`header`（sticky 顶栏）→ `main` → **顶部横向 `Segmented` 导航** → 内容区。
   应用内导航在**顶部**，不要改成左侧栏。
 - 颜色一律用 `web/src/theme.css` 里的语义 token（`var(--color-*)`），不要写死色值。
+- **AntD 表格里放长内容，必须在列上写 `ellipsis`**，只往单元格里套一个 `.ellipsis` 类
+  是不够的。表格默认是 **auto 布局**：长且不可折行的内容会把列撑到自身宽度、列上的
+  `width` 变成摆设，结果是**整张表横向滚动、最右边的列被推出视野**（实测：声明 240
+  实际撑到 454；新加一列后 `scrollWidth` 1952 > 容器 1374）。写
+  `ellipsis: { showTitle: false }` —— AntD 接到它才会切成 fixed 布局；
+  `showTitle: false` 是因为通常已经有内容更全的自定义 Tooltip。
+  加列之后**量一下 `scrollWidth <= clientWidth`**，`pnpm verify:layout` 里有这条断言。
 - **深浅两套主题**：切换开关写在 `<html data-theme="dark">` 上，
   `theme.css` 的 `:root`（浅）与 `[data-theme='dark']`（深）**必须一一对应**
   （与主题无关的几何 token 明确豁免，见脚本里的 `THEME_INDEPENDENT`）。
