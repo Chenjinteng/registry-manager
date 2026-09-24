@@ -356,6 +356,9 @@ node server/index.mjs
 
   新增配置项时要同步**五处**：`config.mjs`、`docker-compose.yml`、`.env.example`、
   README 的变量表、以及 `registry.config.example.json`。
+- **`docker-compose.yml` 里不写变量说明**，只负责"接线"（`VAR: ${VAR:-默认值}`）；
+  解释统一放在 `.env.example`。同一句话在两个文件里各写一份，迟早说不到一起去 ——
+  而 compose 那份又总是被先读到的那个。
 - **凭据库与代理库共用一个密钥**（`REGISTRY_CREDENTIAL_KEY`，scrypt 派生），
   但落在两个独立文件（`credentials.json` / `proxies.json`）。
   密钥与文件同时丢失 = 永久不可恢复 —— 文档里必须一直保留这句提醒。

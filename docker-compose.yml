@@ -1,68 +1,42 @@
 # 用法：
-#   cp .env.example .env      # 填好 REGISTRY_URL
+#   cp .env.example .env      # 所有变量的说明都在 .env.example 里
 #   docker compose up -d --build
 #
 # 不写 version 键：Compose v2 已废弃它，写上只会多一条警告。
+#
+# 这里只负责"接线"：变量一律从 .env 取，解释统一放在 .env.example，
+# 免得同一句说明在两个文件里各写一份、迟早说不到一起去。
 
 services:
   registry-manager:
     build:
       context: .
       args:
-        # 构建机拉不到 Docker Hub 时，在 .env 里把 NODE_IMAGE 指向内网副本，
-        # 例如 192.0.2.10:10001/node:22-alpine
         NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
-        # 构建机访问 npm registry 需要代理时，用下面这条构建（地址必须是
-        # 构建容器内能访问到的，写 127.0.0.1 只会指向容器自己）：
-        #   docker compose build --build-arg HTTPS_PROXY=http://<host>:<port>
 
-    # 要推到自己的 registry，在 .env 里把 IMAGE 改成带前缀的完整名
     image: ${IMAGE:-registry-manager:0.8.0}
     container_name: registry-manager
     restart: unless-stopped
 
     ports:
-      # 容器内固定监听 8787（Dockerfile 的 PORT 默认值），这里只改宿主机端口
       - "${HOST_PORT:-8787}:8787"
 
     environment:
-      # 必填。没设置时直接给出可读报错，而不是起一个连不上 registry 的容器。
       REGISTRY_URL: ${REGISTRY_URL:?请在 .env 里设置 REGISTRY_URL，参考 .env.example}
       REGISTRY_NAME: ${REGISTRY_NAME:-镜像仓库}
-      # 留空 = 直连
       REGISTRY_PROXY: ${REGISTRY_PROXY:-}
-      # 本 registry 自身的 basic auth（部署级；不填 = 匿名访问）
       REGISTRY_USERNAME: ${REGISTRY_USERNAME:-}
       REGISTRY_PASSWORD: ${REGISTRY_PASSWORD:-}
       REGISTRY_CACHE_TTL_SECONDS: ${REGISTRY_CACHE_TTL_SECONDS:-60}
-      # 设为 false 进入只读模式：隐藏删除入口并拒绝所有删除请求
       REGISTRY_ALLOW_DELETE: ${REGISTRY_ALLOW_DELETE:-true}
-      # 镜像拉取：设为 false 后服务端拒绝所有 /api/pull/* 写入（GET 仍可读）
       REGISTRY_ALLOW_PULL: ${REGISTRY_ALLOW_PULL:-true}
-      # 内存里保留的最近任务数（当前 + 排队 + 刚完成的几条）。
-      # 完整历史在 SQLite 里，由下面的 REGISTRY_PULL_HISTORY_RETENTION_DAYS 决定留多久。
       REGISTRY_PULL_QUEUE_SIZE: ${REGISTRY_PULL_QUEUE_SIZE:-50}
-      # 拉取历史的保留天数。历史落在 SQLite 里，**重启不再丢失**。
       REGISTRY_PULL_HISTORY_RETENTION_DAYS: ${REGISTRY_PULL_HISTORY_RETENTION_DAYS:-90}
-      # 镜像热度：接收 registry 推来的 push/pull 事件（Distribution 的 notifications webhook）。
-      # ⚠️ 光在这里设密钥**不会**让热度工作：registry 的 config.yml 里也必须加一段 notifications
-      #    指向本服务、用同一个密钥，改完还要**重启 registry 容器**。步骤见 README「镜像热度」。
-      # 密钥必须与 registry 侧 notifications.headers.Authorization 里的值一致；
-      # **不设置就拒绝所有事件**（安全默认值），页面会提示怎么配。
       REGISTRY_NOTIFY_TOKEN: ${REGISTRY_NOTIFY_TOKEN:-}
-      # 设为 false 后不再接收热度事件（已统计的历史仍可查询）
       REGISTRY_ALLOW_REGISTRY_EVENTS: ${REGISTRY_ALLOW_REGISTRY_EVENTS:-true}
-      # 热度数据的保留天数
       REGISTRY_STATS_RETENTION_DAYS: ${REGISTRY_STATS_RETENTION_DAYS:-90}
-      # 不计入热度的客户端 User-Agent 片段（逗号分隔，子串匹配、忽略大小写）。
-      # 用来排掉 registry 上常驻的同步工具（regsync / skopeo 之类按点扫全量、
-      # 把每个 tag 的热度刷成同一个数）。registry 侧的 notifications 只能按
-      # action / media type 过滤，没有按客户端过滤的入口，所以只能在这里排。
-      # 例：REGISTRY_STATS_IGNORE_USERAGENTS=regclient/regsync,skopeo
       REGISTRY_STATS_IGNORE_USERAGENTS: ${REGISTRY_STATS_IGNORE_USERAGENTS:-}
-      # 凭据库：加密 JSON 落盘；必填密钥，否则凭据库不可用（拉取仍可匿名工作）
       REGISTRY_CREDENTIAL_KEY: ${REGISTRY_CREDENTIAL_KEY:?请设置 REGISTRY_CREDENTIAL_KEY；任意随机 32+ 字符字符串，启动后切勿丢失}
-      # 数据目录：加密凭据、代理库，以及热度统计的 SQLite 文件都放这里
       REGISTRY_CREDENTIALS_DIR: ${REGISTRY_CREDENTIALS_DIR:-/app/data}
 
     # 数据目录要持久化，否则容器一重建凭据、代理、热度历史就都没了。
