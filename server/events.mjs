@@ -439,6 +439,13 @@ export class ActivityStore {
       accepted: this.#accepted,
       rejected: this.#rejected,
       buffered: this.#buffer.length,
+      /**
+       * 排查缓冲的**容量**。
+       *
+       * 回显出去是为了让界面能写"只保留最近 N 条"而不用把这个数字抄进前端 ——
+       * 抄过去的话，改容量时界面会继续说旧数字，而且不报错。
+       */
+      bufferSize: this.#bufferSize,
       /** 被折叠的自身请求条数（不计入的那些，主要是盘点的读请求）；不在 accepted / rejected 里，也不在缓冲里。 */
       self: this.#self,
       /** 被折叠的"已命中忽略规则"的事件条数；同样不在 accepted / rejected 里。 */

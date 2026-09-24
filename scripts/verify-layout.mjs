@@ -436,6 +436,34 @@ try {
       !ignoredCfg?.length || Boolean(panelHeader?.includes('已忽略')),
       JSON.stringify({ 配置: ignoredCfg, 标题: panelHeader?.slice(0, 100) })
     );
+
+    /*
+     * 这张表**长得像历史记录**，其实只是内存缓存：不落盘、重启即清空。
+     *
+     * 折叠状态就要看得见，因为"要不要拿它当历史用"这个判断在人展开之前就做了；
+     * 展开以后还要有一句说全的（能往前看多久、重启会不会没）。
+     * 少了这个标注，用户会对着两三天的窗口找"上周是谁在刷"，找不到就以为没发生过。
+     */
+    check(
+      '「最近事件」在折叠状态就标着「不落盘」（否则会被当成历史记录）',
+      Boolean(panelHeader?.includes('不落盘')),
+      JSON.stringify({ 标题: panelHeader?.slice(0, 120) })
+    );
+    const eventNote = await evaluate(`(() => {
+      const header = [...document.querySelectorAll('.ant-collapse-header')]
+        .find((h) => h.innerText.includes('最近事件'));
+      const body = header?.closest('.ant-collapse-item')?.querySelector('.ant-collapse-content');
+      return body ? body.innerText.replace(/\\s+/g, ' ') : null;
+    })()`);
+    check(
+      '展开后有一句说全的：只保留最近 N 条 + 只存在内存里 + 重启清空 + 指向持久视图',
+      Boolean(eventNote) &&
+        /只保留最近 \d+ 条/.test(eventNote) &&
+        eventNote.includes('只存在内存里') &&
+        eventNote.includes('重启') &&
+        eventNote.includes('见过的客户端'),
+      JSON.stringify(eventNote?.slice(0, 160))
+    );
     /*
      * 「见过的客户端」：这一块才是"谁在打"的答案。它必须**不用展开**就能看见，
      * 而且"已被规则排掉的客户端"要显示成「已忽略」而不是给一个还会再点一次的按钮。

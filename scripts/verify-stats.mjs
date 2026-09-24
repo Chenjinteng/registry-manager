@@ -480,8 +480,19 @@ store.close();
   check(
     '清空后累计计数与内存缓冲一起归零（否则面板还挂着旧事件，看着像没清成功）',
     JSON.stringify(purgeStore.totals()) ===
-      JSON.stringify({ accepted: 0, rejected: 0, buffered: 0, self: 0, ignored: 0 }),
+      JSON.stringify({ accepted: 0, rejected: 0, buffered: 0, bufferSize: 200, self: 0, ignored: 0 }),
     JSON.stringify(purgeStore.totals())
+  );
+  /*
+   * 容量要回显给界面。
+   *
+   * 界面上那句"只保留最近 N 条"必须用这个值，不能在前端写死 —— 写死的话改容量时
+   * 界面会继续说旧数字，而且不报错、type-check 也过（和 --color-error 同一类缺陷）。
+   */
+  check(
+    '缓冲容量回显给界面（界面文案不许写死这个数字）',
+    purgeStore.totals().bufferSize > 0 && purgeStore.totals().buffered <= purgeStore.totals().bufferSize,
+    JSON.stringify({ bufferSize: purgeStore.totals().bufferSize, buffered: purgeStore.totals().buffered })
   );
 
   /*

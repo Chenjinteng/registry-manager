@@ -907,7 +907,7 @@ app.get('/api/stats/events', (req, res) => {
       items: activityStore ? activityStore.recentEvents(limit) : [],
       totals: activityStore
         ? activityStore.totals()
-        : { accepted: 0, rejected: 0, buffered: 0, self: 0, ignored: 0 },
+        : { accepted: 0, rejected: 0, buffered: 0, bufferSize: 0, self: 0, ignored: 0 },
     },
   });
 });

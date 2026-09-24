@@ -705,6 +705,14 @@ export default function StatsPage({ config, onConfigChange }: Props) {
             label: (
               <Space size={8} wrap>
                 <span>最近事件（排查用）</span>
+                {/*
+                  这张表**长得像历史记录**，其实只是内存里的排查缓存：不落盘、重启即清空。
+                  不标出来的话，用户会拿它当历史用 —— 对着一段三五天前的窗口找"上周是谁在刷"，
+                  找不到就以为"没发生过"。长期的那份是上面的「见过的客户端」。
+                */}
+                <span style={{ fontSize: 12, color: 'var(--color-text-4)' }}>
+                  内存缓存 · 不落盘
+                </span>
                 <span style={{ fontSize: 12, color: 'var(--color-text-3)' }}>
                   计入 {eventTotals?.accepted ?? 0} / 未计入 {eventTotals?.rejected ?? 0}
                 </span>
@@ -743,22 +751,35 @@ export default function StatsPage({ config, onConfigChange }: Props) {
               </Space>
             ),
             children: (
-              <Table<StatsEventItem>
-                rowKey={(record) => `${record.at}-${record.id}`}
-                size="small"
-                loading={loading}
-                columns={eventColumns}
-                dataSource={events}
-                scroll={{ x: 1000 }}
-                pagination={{
-                  size: 'small',
-                  defaultPageSize: 10,
-                  pageSizeOptions: [10, 20, 50],
-                  showSizeChanger: true,
-                  showTotal: (total) => `共 ${total} 条`,
-                }}
-                locale={{ emptyText: <Empty description="还没收到任何事件" /> }}
-              />
+              <>
+                {/*
+                  展开后也要再说一遍，而且说全：标签上那四个字在折叠状态下够用，
+                  真对着表格找东西时需要的却是"到底能往前看多久、重启会不会没"。
+                  条数取服务端回显的 bufferSize，不在这里写死 200 —— 写死了改容量时
+                  界面会继续说旧数字，而且不报错。
+                */}
+                <div style={{ fontSize: 12, color: 'var(--color-text-3)', marginBottom: 8 }}>
+                  这张表只保留最近 {eventTotals?.bufferSize ?? 0} 条，且<strong>只存在内存里</strong>
+                  {' '}—— 服务重启就清空，也没有更早的历史。想看更早的请用上面的「见过的客户端」
+                  （它落盘，重启不丢）。
+                </div>
+                <Table<StatsEventItem>
+                  rowKey={(record) => `${record.at}-${record.id}`}
+                  size="small"
+                  loading={loading}
+                  columns={eventColumns}
+                  dataSource={events}
+                  scroll={{ x: 1000 }}
+                  pagination={{
+                    size: 'small',
+                    defaultPageSize: 10,
+                    pageSizeOptions: [10, 20, 50],
+                    showSizeChanger: true,
+                    showTotal: (total) => `共 ${total} 条`,
+                  }}
+                  locale={{ emptyText: <Empty description="还没收到任何事件" /> }}
+                />
+              </>
             ),
           },
         ]}

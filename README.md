@@ -116,7 +116,7 @@ docker compose up -d --build
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.9.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.9.1` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -127,7 +127,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.9.0 .
+docker build -t registry-manager:0.9.1 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -135,7 +135,7 @@ docker build -t registry-manager:0.9.0 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.9.0 .
+  -t registry-manager:0.9.1 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -146,7 +146,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.9.0 .
+  -t registry-manager:0.9.1 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -162,7 +162,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.9.0
+  registry-manager:0.9.1
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -188,8 +188,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.9.0 192.0.2.10:10001/example/registry-manager:0.9.0
-docker push 192.0.2.10:10001/example/registry-manager:0.9.0
+docker tag registry-manager:0.9.1 192.0.2.10:10001/example/registry-manager:0.9.1
+docker push 192.0.2.10:10001/example/registry-manager:0.9.1
 ```
 
 ### 镜像内置
@@ -627,7 +627,7 @@ notifications:
 | --- | --- | --- | --- | --- | --- |
 | `docker/27.3.1 …` | 12 | 12 | 3 周前 | 昨天 | 忽略 |
 | `regclient/regsync (v0.11.5)` | 8230 | 0 | 3 周前 | 2 小时前 | 已忽略 |
-| `registry-manager/0.9.0` | 178 | 0 | 3 周前 | 刚刚 | 本工具 |
+| `registry-manager/0.9.1` | 178 | 0 | 3 周前 | 刚刚 | 本工具 |
 | `some-cron/1.0` | **7** | **7** | **2 天前** | 8 小时前 | **忽略** ← 一眼看到 |
 
 - **行数只跟"有多少个不同的客户端"有关**，与事件量无关 —— 全部 regsync 流量只占一行；
@@ -645,6 +645,9 @@ notifications:
 - 保留期默认 90 天（`REGISTRY_STATS_RETENTION_DAYS`），按天聚合。
 - 热度页底部有「最近事件」面板：事件到了但没被计入时，能直接看出原因，
   并能看到每条事件的客户端身份（`User-Agent` / 来源地址 / Host / 账号）。
+- **「最近事件」只是内存里的排查缓存**（默认最近 200 条）：**不落盘，进程重启即清空**，
+  也不会保留更早的历史。它长得像历史记录，请注意别拿它当历史用 ——
+  要看"这个客户端来过没有、有没有在污染热度"，用上面的「见过的客户端」（它落盘）。
 
 ### 自动化流量会把热度刷高
 
