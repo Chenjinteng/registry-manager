@@ -71,6 +71,15 @@ export interface AppConfig {
   statsSince: string | null;
   /** 热度数据的保留天数。 */
   statsRetentionDays: number;
+  /**
+   * 不计入热度的客户端 User-Agent 片段（`REGISTRY_STATS_IGNORE_USERAGENTS`）。
+   *
+   * 用来排掉 registry 上常驻的同步工具（regsync 之类）—— 它们按点扫全量，
+   * 会把每个 tag 的热度刷成同一个数。registry 侧的 `notifications` 只能按
+   * action / media type 过滤，没有按客户端过滤的入口，所以只能在这一侧排。
+   * 下发到前端是为了能**确认规则生效了**：否则"热度不涨"和"配置没读到"看起来一样。
+   */
+  statsIgnoreUseragents: string[];
 }
 
 export interface ApiResult<T> {

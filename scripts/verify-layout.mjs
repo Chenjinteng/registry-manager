@@ -417,6 +417,25 @@ try {
       !panel?.cells?.length || panel.cells.some((cell) => cell.length > 0),
       JSON.stringify(panel?.cells?.slice(0, 4))
     );
+
+    /*
+     * 配了忽略规则时，面板标题上必须能看到它。
+     * 理由：rule 生效和 rule 没读到，在界面上都是"热度不涨" —— 必须给人一个能确认的地方。
+     * 没配规则时这条没意义（skip 掉，不算失败）。
+     */
+    const ignoredCfg = await evaluate(
+      `fetch('/api/config').then((r) => r.json()).then((j) => j.data.statsIgnoreUseragents)`
+    );
+    const panelHeader = await evaluate(`(() => {
+      const header = [...document.querySelectorAll('.ant-collapse-header')]
+        .find((h) => h.innerText.includes('最近事件'));
+      return header ? header.innerText.replace(/\\s+/g, ' ') : null;
+    })()`);
+    check(
+      '配了忽略规则时，面板标题上能看到「已忽略：…」（否则"规则生效"和"没读到"分不清）',
+      !ignoredCfg?.length || Boolean(panelHeader?.includes('已忽略')),
+      JSON.stringify({ 配置: ignoredCfg, 标题: panelHeader?.slice(0, 100) })
+    );
     // 截图前先把它滚进视野：这个面板在页面最底部，不滚的话截到的是 Top 榜单。
     await evaluate(
       `[...document.querySelectorAll('.ant-collapse-header')].find((h) => h.innerText.includes('最近事件'))?.scrollIntoView({ block: 'center' })`

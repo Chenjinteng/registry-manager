@@ -153,8 +153,13 @@ SQL 全部集中在 `server/db.mjs`（类名就叫 `Db`）。**不要**因此往
   写成 `{GET, PUT}` 会留下无 tag 的 GET、丢掉带 tag 的 HEAD。
 - **blob 事件的 `target.mediaType` 是 `application/octet-stream`**（不是 layer 的 media type）。
   官网示例里的 `ignoredmediatypes: [application/octet-stream]` 就是为它准备的。
-- `request.addr` 在端口映射下是 **Docker 网桥网关**（如 `172.19.0.1`），**不是真实客户端**
-  → 不要用它做客户端识别。
+- `request.addr` **要看场景，不能一概而论**（早先这里写成"端口映射下一定是网桥网关"，太绝对了）：
+  - 客户端在**别的机器**上 → 是**真实客户端 IP**，带临时端口。实测 regsync（跑在 192.0.2.11）
+    拉 192.0.2.10 时是 `192.0.2.11:50672` —— 这种情况它**可以**用来区分客户端。
+  - 客户端与 registry **同宿主**（含容器端口映射，例如在宿主机上 `docker pull`）→ 是 Docker
+    网桥网关（如 `172.19.0.1`），那时**所有人都是它**，区分不了任何东西。
+  - 结论：判断"能不能按 IP 排"之前，先看一眼真实事件里的 `addr` 分布；
+    UA 才是无条件可靠的那个。
 - `actor` 未认证时是 `{}`；`id` 是 **UUIDv7**（适合做去重键）；`timestamp` 的小数位数
   **不固定**（9 位 / 8 位混用），但 `new Date()` 能正确截断，**不需要**像 image config 的
   `created` 那样手动处理。
@@ -166,17 +171,26 @@ SQL 全部集中在 `server/db.mjs`（类名就叫 `Db`）。**不要**因此往
   `ignore.mediatypes` 与 `ignore.actions`（旧写法 `ignoredmediatypes`），
   **没有按客户端 / 仓库 / User-Agent 过滤的入口**。所以"排掉某个自动化进程"只能在我们
   这一侧做，别去改 registry 的配置（改它还要重启 registry，重启会丢掉未发送的事件队列）。
-- **排除自动化流量（regsync / skopeo 之类按点扫全量）时，只有 `request.useragent` 可靠**：
+- **排除自动化流量（regsync / skopeo 之类按点扫全量）时，只有 `request.useragent` 无条件可靠**：
 
   | 字段 | 可用性 |
   | --- | --- |
-  | `request.useragent` | **可靠**。docker CLI 是 `docker/27.x ... UpstreamClient(...)`，同步工具带自己的 UA（`regclient/...` / `skopeo/...`） |
-  | `request.addr` | 端口映射下是 Docker 网桥地址（如 `172.19.0.1`），**所有人都是它**，区分不了任何东西 |
+  | `request.useragent` | **可靠**。docker CLI 是 `docker/27.x ... UpstreamClient(...)`，同步工具带自己的 UA —— 实测 regsync 是 `regclient/regsync (v0.11.5)` |
+  | `request.addr` | **看场景**（见上一条）：客户端在别的机器上是真 IP（实测 `192.0.2.11:50672`，可用）；与 registry 同宿主时是网桥网关（不可用） |
   | `request.host` | 内网里所有客户端用的 Host 头通常一致 |
   | `actor.name` | 只有 registry 开了认证**且**该工具用独立账号时才有值；未开认证时是 `{}` |
 
   这四个字段现在都存进内存里的排查缓冲（并做长度截断 —— 外部输入不能无界撑大内存），
-  所以「最近事件」面板能直接看出是谁在打。
+  所以「最近事件」面板能直接看出一列 UA 整齐地刷满所有仓库。
+- **排除规则是 `REGISTRY_STATS_IGNORE_USERAGENTS`**（逗号分隔、**子串匹配、忽略大小写**）。
+  实现在 `classifyEvent` 里，且**必须放在最前面**：整类客户端都不算的时候，它的 blob 事件、
+  GET 事件也都不算，reason 说"这个客户端被忽略了"比特意去区分"它是 blob 还是 GET"有用
+  （后者会让人以为只忽略了那一部分，进而怀疑配置没生效）。
+  reason 写成 `IGNORED_USERAGENT:<命中的片段>`，并在 `/api/config` 与面板标题上回显规则 ——
+  "被排掉了"和"事件根本没到"必须分得清，否则下一次排查又会绕一圈。
+  加规则/改规则时要确认三处都传到位：`config.mjs` 解析 → `index.mjs` 构造 `ActivityStore`
+  → `ActivityStore` 传给 `classifyEvent`。**任何一环断了，表现都是"配了规则但热度照旧被刷"**，
+  所以 `verify:stats` 三层都有断言（已验证：四环逐个回退都会有断言失败）。
 - 症状识别：自动化进程会把**每个 tag 的热度刷成同一个数**，且所有仓库的"最近活动"是
   同一个时刻。看到这种整齐度就别再怀疑是人了。
 - **清空热度（`purgeHeat`）刻意不碰 `pull_jobs`**：拉取历史是任务记录，不是统计口径的
@@ -298,7 +312,7 @@ node server/index.mjs
   | `REGISTRY_CACHE_TTL_SECONDS` / `REGISTRY_ALLOW_DELETE` | 缓存时长、只读模式 |
   | `REGISTRY_ALLOW_PULL` / `REGISTRY_PULL_QUEUE_SIZE` | 是否允许拉取、**内存里**保留的任务条数 |
   | `REGISTRY_PULL_HISTORY_RETENTION_DAYS` | 拉取历史的保留天数（落 SQLite，与热度分开配置） |
-  | `REGISTRY_NOTIFY_TOKEN` / `REGISTRY_ALLOW_REGISTRY_EVENTS` / `REGISTRY_STATS_RETENTION_DAYS` | 热度事件的共享密钥、是否接收、保留天数 |
+  | `REGISTRY_NOTIFY_TOKEN` / `REGISTRY_ALLOW_REGISTRY_EVENTS` / `REGISTRY_STATS_RETENTION_DAYS` / `REGISTRY_STATS_IGNORE_USERAGENTS` | 热度事件的共享密钥、是否接收、保留天数、要排除的客户端 UA 片段 |
   | `REGISTRY_CREDENTIAL_KEY` / `REGISTRY_CREDENTIALS_DIR` | 加密存储的密钥与**数据目录**（凭据、代理库、热度数据库） |
 
   新增配置项时要同步**五处**：`config.mjs`、`docker-compose.yml`、`.env.example`、
@@ -331,12 +345,16 @@ Location / 上传会话各一套），用真实代码路径跑完整流程。**�
 `scripts/verify-stats.mjs`（`pnpm verify:stats`）专门钉**热度口径**：blob 事件不计入、
 pull 的内容下载（GET）不计入、push 时的 blob 探测不计入、同一个 `event.id` 只计一次；
 另外钉**排查用的身份字段**（`useragent` / `addr` / `host` / `actor` 有没有真的存下来、
-超长输入有没有被截断）与**清空热度**（聚合与去重窗口一起清、清完同一个 id 能重新计入、
-累计计数与内存缓冲一起归零、HTTP 层能读能清）。
+超长输入有没有被截断）、**清空热度**（聚合与去重窗口一起清、清完同一个 id 能重新计入、
+累计计数与内存缓冲一起归零、HTTP 层能读能清）与**客户端排除**
+（子串 / 忽略大小写 / 不误伤 / 空列表不改变默认行为；配置解析 → ActivityStore → classifyEvent
+→ HTTP 层四环都钉住）。
 **改动 `server/events.mjs` 的过滤判据时必须同时跑它**，并按上面的规矩确认回退后会失败
 （已验证：去掉 method 判据会有 6 项失败、去掉 mediaType 判据会有 5 项失败；
 去掉身份字段会有 4 项失败、`purgeHeat` 漏删去重窗口会有 2 项失败、
-`purge` 不清内存缓冲会有 1 项失败、删掉 `DELETE /api/stats/heat` 会有 2 项失败）。
+`purge` 不清内存缓冲会有 1 项失败、删掉 `DELETE /api/stats/heat` 会有 2 项失败；
+去掉客户端排除会有 10 项失败、`ActivityStore` 不透传规则会有 5 项失败、
+`index.mjs` 不透传会有 3 项失败、逗号不拆分会有 4 项失败）。
 
 `scripts/verify-pull-history.mjs`（`pnpm verify:pull-history`）钉**拉取历史的存储契约**：
 **老库（user_version=1，只有热度）升级到 v2 不丢数据**、queued/running 不落库、

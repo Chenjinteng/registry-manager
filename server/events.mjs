@@ -54,12 +54,28 @@ function clip(value, max) {
 }
 
 /**
+ * 命中哪条忽略规则（返回命中的片段，用来写进 reason）；没命中返回空串。
+ *
+ * **子串匹配、忽略大小写**：`regclient/regsync` 要能匹配 `regclient/regsync (v0.11.5)`，
+ * 不然对方升个小版本就得跟着改配置。返回值保留配置里的原始大小写，便于回显核对。
+ */
+export function matchIgnoredUseragent(useragent, patterns) {
+  const ua = String(useragent ?? '').toLowerCase();
+  if (!ua) {
+    return '';
+  }
+  return (patterns ?? []).find((pattern) => ua.includes(String(pattern).toLowerCase())) ?? '';
+}
+
+/**
  * 判定一条事件是否计入热度。**纯函数**，便于在验证脚本里直接断言。
  *
+ * @param {object} event registry 推来的单条事件
+ * @param {{ignoreUseragents?: string[]}} [options] 要忽略的客户端 User-Agent 片段
  * @returns {{counted: boolean, reason: string, repository?: string, tag?: string,
  *            action?: string, day?: string, digest?: string}}
  */
-export function classifyEvent(event) {
+export function classifyEvent(event, { ignoreUseragents = [] } = {}) {
   const action = String(event?.action ?? '');
   const target = event?.target ?? {};
   const request = event?.request ?? {};
@@ -67,6 +83,18 @@ export function classifyEvent(event) {
   const mediaType = String(target.mediaType ?? '');
   const repository = String(target.repository ?? '');
   const tag = String(target.tag ?? '');
+
+  /*
+   * 客户端级的排除放在**最前面**。
+   *
+   * 整类客户端都不算的时候，它的 blob 事件、GET 事件也都不算 —— 这时说
+   * "这个客户端被忽略了"比逐条去区分"它是 blob 还是 GET"有用得多：
+   * 后者会让人以为只忽略了那一部分，进而怀疑配置没生效。
+   */
+  const ignored = matchIgnoredUseragent(request.useragent, ignoreUseragents);
+  if (ignored) {
+    return { counted: false, reason: `IGNORED_USERAGENT:${ignored}` };
+  }
 
   if (!repository) {
     return { counted: false, reason: 'NO_REPOSITORY' };
@@ -147,6 +175,7 @@ export class ActivityStore {
   #bufferSize;
   #retentionDays;
   #dedupDays;
+  #ignoreUseragents;
   #accepted = 0;
   #rejected = 0;
 
@@ -154,12 +183,22 @@ export class ActivityStore {
    * @param {object} opts
    * @param {import('./db.mjs').Db} opts.db 共用的持久层（拉取历史也用它，所以由调用方注入，
    *                                        而不是各自开一个连接）
+   * @param {string[]} [opts.ignoreUseragents] 不计入热度的客户端 User-Agent 片段
+   *                                          （registry 侧的 notifications 排不掉它们，
+   *                                          只能在这里排 —— 见 config.mjs）
    */
-  constructor({ db, retentionDays = 90, dedupDays = 7, bufferSize = DEFAULT_BUFFER_SIZE }) {
+  constructor({
+    db,
+    retentionDays = 90,
+    dedupDays = 7,
+    bufferSize = DEFAULT_BUFFER_SIZE,
+    ignoreUseragents = [],
+  }) {
     this.#db = db;
     this.#retentionDays = retentionDays;
     this.#dedupDays = dedupDays;
     this.#bufferSize = bufferSize;
+    this.#ignoreUseragents = ignoreUseragents;
     // 启动时先清一次，避免保留期改小后旧数据一直留着。
     this.cleanup();
   }
@@ -174,7 +213,7 @@ export class ActivityStore {
     const events = Array.isArray(envelope?.events) ? envelope.events : [];
     const result = { received: events.length, accepted: 0, duplicates: 0, skipped: 0 };
     for (const event of events) {
-      const verdict = classifyEvent(event);
+      const verdict = classifyEvent(event, { ignoreUseragents: this.#ignoreUseragents });
       const base = {
         at: new Date().toISOString(),
         eventAt: String(event?.timestamp ?? ''),

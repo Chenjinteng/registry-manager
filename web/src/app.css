@@ -361,6 +361,17 @@
   font-size: 13px;
 }
 
+/*
+ * 「最近事件」里"未计入"的原因文本。
+ *
+ * 默认的断行规则不会在 `IGNORED_USERAGENT:regclient/regsync` 这种长 token 中间折行，
+ * 于是内容溢出单元格、撑出整表横向滚动（实测多出 80px，把最右边的列推出视野）。
+ * `anywhere` 让它在必要时从任意位置断开 —— 表格里宁可折行也不要横向滚。
+ */
+.reason-text {
+  overflow-wrap: anywhere;
+}
+
 .pull-phase-list {
   display: flex;
   flex-direction: column;

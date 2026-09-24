@@ -114,7 +114,13 @@ try {
 }
 
 // 热度：数据库不可用时整个 store 为 null，查询接口退化成空结构（页面按 /api/config 解释原因）。
-const activityStore = db ? new ActivityStore({ db, retentionDays: config.statsRetentionDays }) : null;
+const activityStore = db
+  ? new ActivityStore({
+      db,
+      retentionDays: config.statsRetentionDays,
+      ignoreUseragents: config.statsIgnoreUseragents,
+    })
+  : null;
 
 /**
  * 清理超期数据（启动时一次 + 每 24 小时一次）。
@@ -228,6 +234,11 @@ app.get('/api/config', (req, res) => {
       /** 热度数据最早的一天，用来在空状态里说明“从什么时候开始有数据”。 */
       statsSince: activityStore ? activityStore.earliestDay() : null,
       statsRetentionDays: config.statsRetentionDays,
+      /**
+       * 不计入热度的客户端 User-Agent 片段。下发出去是为了让使用者能**确认配置生效了** ——
+       * 否则"热度不涨"和"配置没读到"看起来一模一样。
+       */
+      statsIgnoreUseragents: config.statsIgnoreUseragents,
       /** 拉取历史的保留天数（与热度分开配置）。 */
       pullHistoryRetentionDays: config.pullHistoryRetentionDays,
     },
@@ -957,6 +968,12 @@ const server = app.listen(config.port, () => {
       `[registry-manager] 热度统计已启用（保留 ${config.statsRetentionDays} 天）` +
         (config.allowRegistryEvents ? '' : '，但已关闭事件接收')
     );
+    if (config.statsIgnoreUseragents.length > 0) {
+      // 打出来，否则"热度不涨"和"规则没生效"从日志上分不清。
+      console.log(
+        `[registry-manager] 已忽略这些客户端的热度事件：${config.statsIgnoreUseragents.join('、')}`
+      );
+    }
     if (!config.notifyToken) {
       // 安全默认值：没配密钥时拒绝所有事件。必须说清楚，否则用户会以为配好了 registry 就有数据。
       console.warn(

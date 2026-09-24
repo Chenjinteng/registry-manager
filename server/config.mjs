@@ -55,6 +55,18 @@ const DEFAULTS = {
   // 是否接收 registry 推来的热度事件（notifications webhook）。
   allowRegistryEvents: true,
   /**
+   * 不计入热度的客户端 User-Agent 片段，默认空（谁都不忽略）。
+   *
+   * 解决的场景：registry 上常驻的同步工具（regsync / skopeo 之类）按点扫全量，
+   * 会把每个 tag 的热度都刷成同一个数 —— 那时热度榜测的是工具的心跳，不是人。
+   * 而 registry 侧的 `notifications` 只能按 action / media type 过滤，
+   * **没有按客户端过滤的入口**，所以只能在这一侧排。
+   *
+   * 匹配规则是**子串、忽略大小写**：`regclient/regsync` 能匹配
+   * `regclient/regsync (v0.11.5)`，不必跟着对方的版本号改配置。
+   */
+  statsIgnoreUseragents: [],
+  /**
    * 本工具的数据目录：加密凭据、代理库、以及 SQLite 数据库（热度 + 拉取历史）都放这里。
    *
    * 名字沿用 REGISTRY_CREDENTIALS_DIR 是为了不破坏已有部署的挂载与卷；
@@ -108,6 +120,18 @@ function toBoolean(value, fallback) {
   return !['false', '0', 'no', 'off'].includes(String(value).trim().toLowerCase());
 }
 
+/**
+ * 逗号分隔的字符串列表；也接受配置文件里直接写成数组。
+ *
+ * 大小写**保留原样**（要回显给使用者看"到底忽略了什么"），
+ * 匹配时才忽略大小写 —— 与 `pickEnvOrFile` 同理，空串是"显式清空"，
+ * 所以 `REGISTRY_STATS_IGNORE_USERAGENTS=` 会得到空列表而不是回落到配置文件。
+ */
+function toList(value) {
+  const items = Array.isArray(value) ? value : String(value ?? '').split(',');
+  return items.map((item) => String(item).trim()).filter((item) => item.length > 0);
+}
+
 export function loadConfig() {
   const file = readConfigFile();
   const config = {
@@ -142,6 +166,13 @@ export function loadConfig() {
     allowRegistryEvents: toBoolean(
       process.env.REGISTRY_ALLOW_REGISTRY_EVENTS ?? file.allowRegistryEvents,
       DEFAULTS.allowRegistryEvents
+    ),
+    statsIgnoreUseragents: toList(
+      pickEnvOrFile(
+        process.env.REGISTRY_STATS_IGNORE_USERAGENTS,
+        file.statsIgnoreUseragents,
+        DEFAULTS.statsIgnoreUseragents
+      )
     ),
     /**
      * 热度事件的共享密钥。**只从环境变量读**，与 REGISTRY_CREDENTIAL_KEY 同理：

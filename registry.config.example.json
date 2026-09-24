@@ -11,6 +11,7 @@
   "pullHistoryRetentionDays": 90,
   "allowRegistryEvents": true,
   "statsRetentionDays": 90,
+  "statsIgnoreUseragents": [],
   "credentialsDir": "/app/data",
   "port": 8787
 }

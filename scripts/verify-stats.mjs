@@ -171,7 +171,71 @@ function blobEvent({ repository, action, method, digest = 'sha256:cafe', size = 
   check('正确密钥通过（不带 Bearer 前缀）', verifyNotifyToken('s3cret', 's3cret').ok === true);
 }
 
-// ───────────────────── 三、端到端：一次真实形状的 pull ─────────────────────
+// ───────────────────── 三、客户端排除：同步工具不能算热度 ─────────────────────
+//
+// 场景（真实发生过）：registry 上常驻 regsync 做实时同步，**按点扫全量**，于是每个 tag
+// 的热度都被刷成同一个数、「最近活动」也全是同一个时刻 —— 热度榜测的是工具的心跳，不是人。
+//
+// registry 侧的 `notifications` 只有 `ignore.mediatypes` / `ignore.actions` 两个过滤项，
+// **没有按客户端过滤的入口**，所以只能在这一侧排。
+//
+// 判据用的是**实测到的真实 User-Agent**，不是猜的：
+//   `regclient/regsync (v0.11.5)`；同一个事件里 `addr` 是 `192.0.2.11:50672`、`actor` 为空。
+{
+  const syncEvent = manifestEvent({
+    repository: 'registry.k8s.io/pause',
+    action: 'pull',
+    method: 'HEAD',
+    tag: '3.7',
+  });
+  syncEvent.request.useragent = 'regclient/regsync (v0.11.5)';
+  const dockerEvent = manifestEvent({ repository: 'nginx', action: 'pull', method: 'HEAD', tag: '1.25' });
+
+  check(
+    '被排除的客户端不计入，reason 里带上命中的片段（便于核对是哪条规则生效）',
+    (() => {
+      const v = classifyEvent(syncEvent, { ignoreUseragents: ['regclient/regsync'] });
+      return v.counted === false && v.reason === 'IGNORED_USERAGENT:regclient/regsync';
+    })(),
+    JSON.stringify(classifyEvent(syncEvent, { ignoreUseragents: ['regclient/regsync'] }))
+  );
+  check(
+    '真人（docker CLI）不受影响',
+    classifyEvent(dockerEvent, { ignoreUseragents: ['regclient/regsync'] }).counted === true
+  );
+  check(
+    '子串匹配：写 `regclient/regsync` 能命中带版本号的完整 UA（对方升版本不用改配置）',
+    classifyEvent(syncEvent, { ignoreUseragents: ['regclient/regsync'] }).counted === false
+  );
+  check(
+    '只写 `regclient` 也能命中（同步工具的通用前缀）',
+    classifyEvent(syncEvent, { ignoreUseragents: ['regclient'] }).counted === false
+  );
+  check(
+    '忽略大小写',
+    classifyEvent(syncEvent, { ignoreUseragents: ['RegClient/RegSync'] }).counted === false
+  );
+  check(
+    '不相关的规则不会误伤（配了 skopeo，docker 照常计入）',
+    classifyEvent(dockerEvent, { ignoreUseragents: ['skopeo'] }).counted === true
+  );
+  check(
+    '空列表 / 不传规则 = 谁都不忽略（默认行为不变）',
+    classifyEvent(syncEvent, { ignoreUseragents: [] }).counted === true &&
+      classifyEvent(syncEvent).counted === true
+  );
+  check(
+    '被排除的客户端连 blob 事件也标成"客户端被忽略"，而不是 NOT_MANIFEST',
+    (() => {
+      const blob = blobEvent({ repository: 'x', action: 'pull', method: 'GET' });
+      blob.request.useragent = 'regclient/regsync (v0.11.5)';
+      const v = classifyEvent(blob, { ignoreUseragents: ['regclient/regsync'] });
+      return v.counted === false && v.reason === 'IGNORED_USERAGENT:regclient/regsync';
+    })()
+  );
+}
+
+// ───────────────────── 四、端到端：一次真实形状的 pull ─────────────────────
 const dir = mkdtempSync(join(tmpdir(), 'registry-manager-stats-'));
 const dbFile = join(dir, 'registry-manager.db');
 // 持久层与 ActivityStore 分开：拉取历史用的是同一个 Db（见 verify-stats 的拉取历史段）。
@@ -212,7 +276,7 @@ const store = new ActivityStore({ db, retentionDays: 90 });
   );
 }
 
-// ───────────────────── 四、重复投递只计一次 ─────────────────────
+// ───────────────────── 五、重复投递只计一次 ─────────────────────
 {
   const event = manifestEvent({ repository: 'redis', action: 'pull', method: 'HEAD', tag: '7' });
   const first = store.ingest({ events: [event] });
@@ -231,7 +295,7 @@ const store = new ActivityStore({ db, retentionDays: 90 });
   check('重复投递在最近事件里标为 DUPLICATE', Boolean(dupEntry), JSON.stringify(dupEntry));
 }
 
-// ───────────────────── 五、一个 push + 一个 pull 分开计 ─────────────────────
+// ───────────────────── 六、一个 push + 一个 pull 分开计 ─────────────────────
 {
   const repository = 'alpine';
   const pushEvents = [
@@ -259,7 +323,7 @@ const store = new ActivityStore({ db, retentionDays: 90 });
   );
 }
 
-// ───────────────────── 六、时间序列与保留期 ─────────────────────
+// ───────────────────── 七、时间序列与保留期 ─────────────────────
 {
   const points = store.series({ days: 30, repository: '' });
   check('全部仓库的时间序列至少有一个点', points.length >= 1 && typeof points[0].day === 'string', JSON.stringify(points));
@@ -289,7 +353,7 @@ const store = new ActivityStore({ db, retentionDays: 90 });
   );
 }
 
-// ───────────────────── 七、排查用的原始事件缓冲 ─────────────────────
+// ───────────────────── 八、排查用的原始事件缓冲 ─────────────────────
 {
   const totals = store.totals();
   check(
@@ -332,7 +396,7 @@ const store = new ActivityStore({ db, retentionDays: 90 });
 
 store.close();
 
-// ───────────────────── 八、schema 版本落盘（重启不重复迁移） ─────────────────────
+// ───────────────────── 九、schema 版本落盘（重启不重复迁移） ─────────────────────
 {
   const reopened = new ActivityStore({ db: new Db({ filePath: dbFile }), retentionDays: 90 });
   check('重新打开已有数据库不会报错（user_version 已落盘）', reopened.summary(30).total === 4);
@@ -356,6 +420,7 @@ store.close();
   });
 
   // 同一个仓库、同一个 tag，一个来自同步工具、一个来自 docker CLI。
+  // 同步工具那侧的 UA / addr 用**实测到的真实值**（见本文件第三节）。
   const syncEvent = {
     id: nextId(),
     timestamp: recentIso(),
@@ -364,8 +429,8 @@ store.close();
     request: {
       id: nextId(),
       method: 'PUT',
-      useragent: 'regclient/v0.8.0 (https://github.com/regclient/regclient)',
-      addr: '172.19.0.1:41234',
+      useragent: 'regclient/regsync (v0.11.5)',
+      addr: '192.0.2.11:50672',
       host: '192.0.2.10:10001',
     },
     actor: {},
@@ -381,7 +446,7 @@ store.close();
   );
   check(
     '身份字段原样落到事件上（前端那一列才有得看）',
-    syncs[0]?.addr === '172.19.0.1:41234' && syncs[0]?.host === '192.0.2.10:10001',
+    syncs[0]?.addr === '192.0.2.11:50672' && syncs[0]?.host === '192.0.2.10:10001',
     JSON.stringify({ addr: syncs[0]?.addr, host: syncs[0]?.host })
   );
 
@@ -424,10 +489,37 @@ store.close();
   check('清空后同一个 event.id 能重新计入（去重窗口也清了）', replay.accepted === 1, JSON.stringify(replay));
 
   purgeStore.close();
+
+  /*
+   * 光有纯函数判据不够：还得确认 `ActivityStore` **真的把规则传下去了**。
+   * 构造参数忘了透传的话，上面那些纯函数断言全绿，线上却照旧被刷。
+   */
+  const ignoreStore = new ActivityStore({
+    db: new Db({ filePath: join(purgeDir, 'ignore.db') }),
+    retentionDays: 90,
+    ignoreUseragents: ['regclient/regsync'],
+  });
+  ignoreStore.ingest({ events: [syncEvent, dockerEvent] });
+  check(
+    '把规则传进 ActivityStore 后，同步工具那次 push 不计入、真人那次 pull 照常计入',
+    ignoreStore.summary(30).total === 1,
+    JSON.stringify(ignoreStore.summary(30))
+  );
+  const ignoredRow = ignoreStore.recentEvents(10).find((e) => e.reason?.startsWith('IGNORED_USERAGENT'));
+  check(
+    '被忽略的事件仍然留在排查缓冲里（否则"被排掉了"和"事件根本没到"分不清）',
+    Boolean(ignoredRow) &&
+      ignoredRow.counted === false &&
+      ignoredRow.repository === 'busybox' &&
+      ignoredRow.useragent.startsWith('regclient/'),
+    JSON.stringify(ignoredRow && { reason: ignoredRow.reason, repository: ignoredRow.repository })
+  );
+  ignoreStore.close();
+
   rmSync(purgeDir, { recursive: true, force: true });
 }
 
-// ───────────────────── 九、HTTP 层：Content-Type 必须能被解析 ─────────────────────
+// ───────────────────── 十、HTTP 层：Content-Type 必须能被解析 ─────────────────────
 //
 // 这一条**只能在 HTTP 层测**，模块级断言永远发现不了它：
 // Distribution 发事件用的 Content-Type 是
@@ -444,6 +536,8 @@ store.close();
       REGISTRY_URL: 'http://192.0.2.10:10001',
       REGISTRY_CREDENTIALS_DIR: httpDir,
       REGISTRY_NOTIFY_TOKEN: 'http-test-token',
+      // 走一遍真实的配置读取路径：环境变量 → loadConfig → ActivityStore → 判定。
+      REGISTRY_STATS_IGNORE_USERAGENTS: 'regclient/regsync,Skopeo',
       PORT: String(port),
     },
     stdio: 'ignore',
@@ -526,6 +620,66 @@ store.close();
         httpEvent?.addr === '172.19.0.1:41234' &&
         httpEvent?.host === '192.0.2.10:10001',
       JSON.stringify({ ua: httpEvent?.useragent?.slice(0, 16), addr: httpEvent?.addr, host: httpEvent?.host })
+    );
+
+    /*
+     * 客户端排除走完整条链路：环境变量 → loadConfig（逗号分隔 + 去空白）→ ActivityStore
+     * → classifyEvent。任何一环断了，"配了规则但热度照旧被刷"这个表现都一模一样。
+     */
+    const cfg = await (await fetch(`${base}/api/config`)).json();
+    check(
+      '配置里的忽略规则解析成列表并下发给前端（逗号分隔 + 去空白）',
+      JSON.stringify(cfg?.data?.statsIgnoreUseragents) === JSON.stringify(['regclient/regsync', 'Skopeo']),
+      JSON.stringify(cfg?.data?.statsIgnoreUseragents)
+    );
+
+    const syncEnvelope = JSON.stringify({
+      events: [
+        {
+          id: 'http-sync-1',
+          timestamp: '2026-09-24T15:32:55.573464143Z',
+          action: 'pull',
+          target: {
+            mediaType: 'application/vnd.docker.distribution.manifest.v2+json',
+            digest: 'sha256:sync',
+            repository: 'registry.k8s.io/pause',
+            tag: '3.7',
+          },
+          request: {
+            method: 'HEAD',
+            // 实测（真实事件）：regsync 的 UA 就是这个，不带版本号也能匹配。
+            useragent: 'regclient/regsync (v0.11.5)',
+            addr: '192.0.2.11:50672',
+            host: '192.0.2.10:10001',
+          },
+        },
+      ],
+    });
+    const syncRes = await fetch(`${base}/api/registry-events`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/vnd.docker.distribution.events.v2+json',
+        Authorization: 'Bearer http-test-token',
+      },
+      body: syncEnvelope,
+    });
+    const syncBody = await syncRes.json();
+    check(
+      'HTTP 层：配了规则之后，同步工具的事件不计入（accepted=0、skipped=1）',
+      syncBody?.data?.accepted === 0 && syncBody?.data?.skipped === 1,
+      `HTTP ${syncRes.status} ${JSON.stringify(syncBody?.data)}`
+    );
+    const afterSync = await (await fetch(`${base}/api/stats/summary?days=30`)).json();
+    check(
+      '总览里只有真人那一次，同步工具没被算进去',
+      afterSync?.data?.total === 1,
+      JSON.stringify(afterSync?.data)
+    );
+    const ignoredEntry = (await (await fetch(`${base}/api/stats/events?limit=10`)).json())?.data?.items?.[0];
+    check(
+      '被忽略的事件仍在「最近事件」里，reason 写着 IGNORED_USERAGENT',
+      ignoredEntry?.counted === false && ignoredEntry?.reason === 'IGNORED_USERAGENT:regclient/regsync',
+      JSON.stringify({ reason: ignoredEntry?.reason, counted: ignoredEntry?.counted })
     );
 
     const purgeRes = await fetch(`${base}/api/stats/heat`, { method: 'DELETE' });

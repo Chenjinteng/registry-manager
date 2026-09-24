@@ -112,10 +112,11 @@ docker compose up -d --build
 | `REGISTRY_NOTIFY_TOKEN` | 空 | 热度事件的共享密钥；**不设置则拒绝所有事件** |
 | `REGISTRY_ALLOW_REGISTRY_EVENTS` | `true` | `false` = 不再接收热度事件（历史仍可查） |
 | `REGISTRY_STATS_RETENTION_DAYS` | `90` | 热度数据的保留天数 |
+| `REGISTRY_STATS_IGNORE_USERAGENTS` | 空 | 不计入热度的客户端 User-Agent 片段（逗号分隔、子串匹配、忽略大小写）。用来排掉常驻的同步工具，见[自动化流量](#自动化流量会把热度刷高) |
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.6.1` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.7.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -126,7 +127,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.6.1 .
+docker build -t registry-manager:0.7.0 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -134,7 +135,7 @@ docker build -t registry-manager:0.6.1 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.6.1 .
+  -t registry-manager:0.7.0 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -145,7 +146,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.6.1 .
+  -t registry-manager:0.7.0 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -161,7 +162,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.6.1
+  registry-manager:0.7.0
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -187,8 +188,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.6.1 192.0.2.10:10001/example/registry-manager:0.6.1
-docker push 192.0.2.10:10001/example/registry-manager:0.6.1
+docker tag registry-manager:0.7.0 192.0.2.10:10001/example/registry-manager:0.7.0
+docker push 192.0.2.10:10001/example/registry-manager:0.7.0
 ```
 
 ### 镜像内置
@@ -224,6 +225,7 @@ docker push 192.0.2.10:10001/example/registry-manager:0.6.1
 | `notifyToken` | `REGISTRY_NOTIFY_TOKEN` | 空 | 热度事件的共享密钥。**只从环境变量读**；不设置则拒绝所有事件 |
 | `allowRegistryEvents` | `REGISTRY_ALLOW_REGISTRY_EVENTS` | `true` | 设为 `false` 后不再接收热度事件（历史仍可查询） |
 | `statsRetentionDays` | `REGISTRY_STATS_RETENTION_DAYS` | `90` | 热度数据的保留天数 |
+| `statsIgnoreUseragents` | `REGISTRY_STATS_IGNORE_USERAGENTS` | `[]` | 不计入热度的客户端 User-Agent 片段；环境变量写逗号分隔的字符串，配置文件里可以写成数组 |
 | `allowCredentials` | (env 决定) | - | 是否启用凭据库（由 `REGISTRY_CREDENTIAL_KEY` 是否设置决定） |
 | `credentialsDir` | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与热度数据库都在这里 |
 | `port` | `PORT` | `8787` | 监听端口 |
@@ -620,25 +622,37 @@ notifications:
 
 registry 上常驻的同步工具（regsync、skopeo 之类）会**按点扫全量**，于是每个 tag 的
 热度都被刷成同一个数、「最近活动」也全是同一个时刻 —— 这时候热度榜测的是工具的心跳，
-不是人。
+不是人。**热度口径本身没错**（那些确实是 push / pull 事件），缺的是"把机器和真人分开"。
 
 **registry 侧排不掉它**：`notifications` 的过滤只有 `ignore.mediatypes` 与
-`ignore.actions` 两项，没有按客户端 / 仓库 / User-Agent 过滤的入口。判断"是谁在打"
-只能在我们这侧做，判据是事件里的 `request.useragent`：
+`ignore.actions` 两项，没有按客户端 / 仓库 / User-Agent 过滤的入口。所以判断"是谁在打"
+只能在这一侧做，判据是事件里的 `request.useragent`：
 
 | 字段 | 能不能用来区分客户端 |
 | --- | --- |
-| `request.useragent` | **最可靠**。真人用 docker CLI（`docker/27.x ...`），同步工具带自己的 UA（`regclient/...` / `skopeo/...`） |
-| `request.addr` | 多半不行。容器**端口映射**后 registry 看到的是 Docker 网桥地址（如 `172.19.0.1`），所有人都是它 |
+| `request.useragent` | **最可靠**。真人用 docker CLI（`docker/27.x ...`），同步工具带自己的 UA（如实测到的 `regclient/regsync (v0.11.5)`） |
+| `request.addr` | **看情况**。从**别的机器**来的请求是真 IP（实测 `192.0.2.11:50672`）；与本 registry **同宿主的容器**（端口映射 + 客户端在宿主机上）则只会看到 Docker 网桥地址（如 `172.19.0.1`），那时它对所有人都是同一个值 |
 | `request.host` | 通常不行。内网里所有客户端用的 Host 头都一样 |
 | `actor.name` | 只有 registry **开了认证且同步工具用独立账号**时才可用；未开认证时它是空的 |
 
-所以排查顺序是：打开热度页的「最近事件」，看「客户端」那一列有没有一个 UA 整齐地
-刷满所有仓库。确认之后再决定怎么过滤（当前版本**还没有**内置排除规则，先把身份看清）。
+#### 怎么排
 
-口径改正之后，已经算歪的历史**追溯不回来**（`activity_daily` 当初没留身份字段），
-用 **设置页 → 清空热度数据** 清掉重新累计即可。它只清热度聚合与幂等去重记录，
-**拉取历史不受影响**。
+1. **先看清是谁**：热度页 →「最近事件」→ 展开 → 看「客户端」列。有没有一个 UA 整齐地
+   刷满所有仓库？（也可以 `curl /api/stats/events?limit=50`）
+2. **把它的片段填进配置**，重启服务：
+
+   ```bash
+   # 逗号分隔；子串匹配、忽略大小写，所以不用带版本号
+   REGISTRY_STATS_IGNORE_USERAGENTS=regclient/regsync,skopeo
+   ```
+
+   被忽略的事件**仍然留在「最近事件」里**，`reason` 标成 `IGNORED_USERAGENT:<命中的片段>` ——
+   这样"被排掉了"和"事件根本没到"才分得清。忽略规则生效时，面板标题上会挂一个
+   「已忽略：…」的标签，`/api/config` 里也能查到，不用猜配置有没有读到。
+
+3. **清掉已经算歪的历史**：口径改正**只对以后生效** —— `activity_daily` 当初没留身份字段，
+   追溯不回来。用 **设置页 → 清空热度数据** 清掉重新累计（只清热度聚合与幂等去重记录，
+   **拉取历史不受影响**）。
 
 ### 与 Prometheus 指标的关系
 

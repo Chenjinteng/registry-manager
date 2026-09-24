@@ -312,17 +312,24 @@ export default function StatsPage({ config, onConfigChange }: Props) {
       title: '是否计入',
       key: 'counted',
       width: 260,
+      ellipsis: { showTitle: false },
       render: (_, record) =>
         record.counted ? (
           <Tag color="green">计入</Tag>
         ) : (
-          <Space size={6}>
+          /*
+           * 用 Fragment 而不是 <Space>：Space 是 inline-flex，`flex-wrap: nowrap` 下长
+           * reason 既不会折行也不会收缩，会把单元格撑出表格、逼出整表横向滚动
+           * （实测 `IGNORED_USERAGENT:regclient/regsync` 撑出 80px）。
+           * 普通行内流 + `.reason-text` 的 overflow-wrap 才能正常折行。
+           */
+          <>
             <Tag color="default">未计入</Tag>
             {/* 去重丢弃的事件 reason 仍是 OK，直接显示会让用户以为是误报。 */}
-            <span style={{ color: 'var(--color-text-3)' }}>
-              {record.duplicate ? '重复投递，已按 event.id 去重' : record.reason || '未知原因'}
+            <span className="reason-text" style={{ color: 'var(--color-text-3)' }}>
+              {record.duplicate ? '重复投递，已按 event.id 去重' : readReason(record.reason)}
             </span>
-          </Space>
+          </>
         ),
     },
   ];
@@ -531,6 +538,19 @@ export default function StatsPage({ config, onConfigChange }: Props) {
                 <span style={{ fontSize: 12, color: 'var(--color-text-3)' }}>
                   计入 {eventTotals?.accepted ?? 0} / 未计入 {eventTotals?.rejected ?? 0}
                 </span>
+                {/*
+                  把"忽略了哪些客户端"写在这里，是为了让配置**看得见**：
+                  否则"规则生效了所以热度不涨"和"规则没读到所以热度不涨"长得一样。
+                  被忽略的事件仍然留在下面这张表里（reason 写着 IGNORED_USERAGENT），
+                  这样"被排掉了"和"事件根本没到"才分得清。
+                */}
+                {config?.statsIgnoreUseragents?.length ? (
+                  <Tooltip title="这些客户端的事件不计入热度（REGISTRY_STATS_IGNORE_USERAGENTS）">
+                    <Tag color="default" style={{ marginInlineEnd: 0 }}>
+                      已忽略：{config.statsIgnoreUseragents.join('、')}
+                    </Tag>
+                  </Tooltip>
+                ) : null}
               </Space>
             ),
             children: (
@@ -678,4 +698,20 @@ function TextCopyButton({ text }: { text: string }) {
 /** 空值统一显示成 —，避免空白单元格看起来像渲染失败。 */
 function monoOrDash(value: string) {
   return <span className="mono">{value || '—'}</span>;
+}
+
+/**
+ * 把服务端的 `reason` 翻成人话。
+ *
+ * 只有被排除的客户端需要翻译：原样显示是 `IGNORED_USERAGENT:regclient/regsync`，
+ * 又长又难读，还会把单元格撑爆。**数据里保留完整的 reason**（排查时要 grep 它、
+ * 接口也要能读），只在界面上换个说法 —— 命中的规则片段照旧带出来，
+ * 否则用户看不出是哪条规则生效了。
+ */
+function readReason(reason: string) {
+  const ignored = /^IGNORED_USERAGENT:(.+)$/.exec(reason ?? '');
+  if (ignored) {
+    return `已忽略客户端 ${ignored[1]}`;
+  }
+  return reason || '未知原因';
 }
