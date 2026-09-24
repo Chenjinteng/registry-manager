@@ -48,8 +48,19 @@ const DEFAULTS = {
   // 内存里保留的最近任务数（当前任务 + 等待队列 + 刚完成的几条）。
   // **完整历史在 SQLite 里**，由 pullHistoryRetentionDays 决定留多久；这里只管内存窗口。
   pullQueueSize: 50,
-  // 热度统计的保留天数。
-  statsRetentionDays: 90,
+  /**
+   * 热度统计的保留天数。
+   *
+   * 默认 365 是**跟界面日历的跨度对齐**的：日历固定画 12 个月（前端 HEATMAP_DAYS），
+   * 保留期比它短的话，图上会有一大片灰格子注定没数据 —— 留 90 天时四分之三的格子
+   * 永远点不亮，"近 12 个月"这张图就等于白画。
+   *
+   * 拉到一年**几乎不花钱**：`activity_daily` 按 (day, repository, tag, action) 聚合，
+   * 行数上界 = 仓库/tag 组合数 × 2 × 天数，与流量无关。实测约 125 B/行，
+   * 91 个 tag 满打满算一年约 6.6 万行 / 8 MB。
+   * 真有量的是逐事件的 `event_seen`，但它走**独立的 7 天去重窗口**，不受这里影响。
+   */
+  statsRetentionDays: 365,
   // 拉取历史的保留天数。与热度**分开配置**：两者的价值周期不一样。
   pullHistoryRetentionDays: 90,
   // 是否接收 registry 推来的热度事件（notifications webhook）。

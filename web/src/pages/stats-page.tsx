@@ -668,6 +668,7 @@ export default function StatsPage({ config, onConfigChange }: Props) {
           points={points}
           days={HEATMAP_DAYS}
           retentionDays={config?.statsRetentionDays ?? null}
+          since={config?.statsSince ?? null}
         />
       </div>
 

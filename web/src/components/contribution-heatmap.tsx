@@ -6,6 +6,7 @@ import {
   HEATMAP_ROW_LABEL_WIDTH,
   HEATMAP_TOP_LABEL_HEIGHT,
   buildHeatmap,
+  heatmapGapNote,
   pickCellSize,
 } from '../heatmap';
 
@@ -29,12 +30,15 @@ export default function ContributionHeatmap({
   points,
   days,
   retentionDays = null,
+  since = null,
 }: {
   points: StatsSeriesPoint[];
   /** 日历跨度（天）。**不由时间窗 Segmented 决定**，见 stats-page 的 HEATMAP_DAYS。 */
   days: number;
   /** 热度数据的保留天数；比跨度短时要说明"更早的灰色不是没有活动"。 */
   retentionDays?: number | null;
+  /** 服务端最早一天（`config.statsSince`）：比跨度晚时，"更早的灰"是**还没开始统计**。 */
+  since?: string | null;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [availableWidth, setAvailableWidth] = useState(0);
@@ -64,17 +68,21 @@ export default function ContributionHeatmap({
   const height = HEATMAP_TOP_LABEL_HEIGHT + 7 * pitch;
   const axisY = (row: number) => HEATMAP_TOP_LABEL_HEIGHT + row * pitch + cell / 2 + 4;
   const period = safeDays >= 360 ? '近 12 个月' : `近 ${safeDays} 天`;
-  // 保留期比跨度短时，更早的格子必然是灰的 —— 必须说清那不是"没有活动"。
-  const retentionNote =
-    retentionDays && retentionDays < safeDays
-      ? `热度数据只保留 ${retentionDays} 天，更早的灰色是已过期，不代表没有活动`
-      : null;
+  /*
+   * 灰格子有两个原因（已过期 / 还没开始统计），判定放在 heatmap.ts 里 ——
+   * 这类"长得不对但不抛异常"的逻辑必须能单独断言，见 scripts/verify-heatmap.mjs。
+   */
+  const retentionNote = heatmapGapNote({ days: safeDays, retentionDays, since });
 
   return (
     <div className="heatmap" ref={wrapRef}>
       <div className="heatmap-caption">
         <span>
-          {period}共 <strong>{total}</strong> 次
+          {/*
+            后面还有半句时必须收句号：这两个 span 靠 flex 的 gap 分隔，**视觉上有间距、
+            取出来的文字却连在一起**（"共 3952 次服务端从…开始统计"），读屏也照读。
+          */}
+          {period}共 <strong>{total}</strong> 次{total === 0 || retentionNote ? '。' : ''}
         </span>
         {total === 0 ? <span className="heatmap-hint">这段时间内还没有收到事件</span> : null}
         {retentionNote ? <span className="heatmap-hint">{retentionNote}</span> : null}

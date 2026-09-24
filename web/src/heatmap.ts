@@ -143,3 +143,63 @@ export function buildMonthLabels(cells: HeatmapCell[], totalCols: number) {
   }
   return labels;
 }
+
+const utcDay = (date: Date) => date.toISOString().slice(0, 10);
+const shiftDay = (day: string, deltaDays: number) =>
+  utcDay(new Date(new Date(`${day}T00:00:00Z`).getTime() + deltaDays * 86400000));
+
+/**
+ * 日历上"更早的那片灰格子"到底是**为什么**灰的。
+ *
+ * 灰有**两个互相独立**的原因，混着说就会误导 —— 而"找不到就以为没发生过"正是
+ * 这张图最容易让人得出的错误结论：
+ *   - **已过期**：热度只保留 N 天，更早的被动过清理（改 `REGISTRY_STATS_RETENTION_DAYS` 可解）；
+ *   - **还没开始统计**：服务端从某天才开始收事件（新建的库，或刚「清空热度数据」过）。
+ *     这一种**无解**，数据从来没存在过。
+ *
+ * 某天可能有数据，当且仅当它**同时**不早于采集起点、也不早于保留边界。
+ * 两个边界都落在窗口内时，那片灰其实是**两段拼起来的**（前面一段从没采集过、
+ * 后面一段采过但被清了），只挑一个原因说，另一段就被解释错了 —— 所以两段都提。
+ * 实测到的例子：保留 90 天、库也刚建 90 天，两个边界只差一天，而 275 个灰格子里
+ * 有 274 个属于"从没采集过"；这时说"已过期"就是错的。
+ *
+ * 两个边界都在窗口之外（跨度和保留期都覆盖了全部历史）时返回 `null`，不占位置。
+ */
+export function heatmapGapNote({
+  days,
+  retentionDays = null,
+  since = null,
+  today = utcDay(new Date()),
+}: {
+  /** 日历跨度（天）。 */
+  days: number;
+  /** 热度保留天数；不传表示"没有保留期限制"。 */
+  retentionDays?: number | null;
+  /** 服务端最早一天（`config.statsSince`，YYYY-MM-DD）；不传表示未知。 */
+  since?: string | null;
+  /** 基准日，便于断言（默认今天，UTC）。 */
+  today?: string;
+}): string | null {
+  const span = Math.max(1, Math.floor(days) || 1);
+  const windowStart = shiftDay(today, -(span - 1));
+  const retentionStart =
+    retentionDays && retentionDays > 0 ? shiftDay(today, -(Math.floor(retentionDays) - 1)) : windowStart;
+  // 形状不对就当"未知"，别让一个畸形值把整条提示说错。
+  const sinceStart = since && /^\d{4}-\d{2}-\d{2}$/.test(since) ? since : windowStart;
+
+  /** 有格子是**采过但被清理**掉的。 */
+  const expired = retentionStart > windowStart;
+  /** 有格子是**从来没采集**过的。 */
+  const never = sinceStart > windowStart;
+
+  if (never && expired && sinceStart < retentionStart) {
+    return `服务端从 ${sinceStart} 开始统计，且热度只保留 ${retentionDays} 天；更早的灰色不是"没有活动"`;
+  }
+  if (never) {
+    return `服务端从 ${sinceStart} 开始统计，更早的灰色不是"没有活动"`;
+  }
+  if (expired) {
+    return `热度数据只保留 ${retentionDays} 天，更早的灰色是已过期，不代表没有活动`;
+  }
+  return null;
+}

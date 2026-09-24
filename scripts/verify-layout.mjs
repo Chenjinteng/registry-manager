@@ -275,11 +275,45 @@ try {
         h365.containerWidth - h365.gridWidth < h365.cellSize + 6,
       `网格=${h365.gridWidth} 容器=${h365.containerWidth} 留白=${h365.containerWidth - h365.gridWidth} cell=${h365.cellSize}`
     );
-    check(
-      '保留期短于跨度时，caption 说明更早的灰色不是"没有活动"',
-      h365.caption.includes('保留') || h365.caption.includes('12 个月'),
-      h365.caption.slice(0, 60)
+    /*
+     * 灰格子有**两个**原因，都必须说清 —— 这张图最容易得出的错误结论就是
+     * "那片灰 = 那段时间没人用"：
+     *   - 已过期：保留期比跨度短，更早的被清理了；
+     *   - 还没开始统计：服务端从某天才开始收事件（新建的库 / 刚清空过）。
+     * 哪个是决定因素由 max(采集起点, 保留边界) 决定，判定逻辑在 heatmap.ts。
+     */
+    const captionCfg = await evaluate(
+      `fetch('/api/config').then((r) => r.json()).then((j) => ({ since: j.data.statsSince, retention: j.data.statsRetentionDays }))`
     );
+    const sinceInWindow =
+      Boolean(captionCfg?.since) && Date.parse(captionCfg.since) > Date.now() - 365 * 86400000;
+    const retentionBites = Boolean(captionCfg?.retention) && captionCfg.retention < 365;
+    const expectCaption = sinceInWindow || retentionBites;
+    check(
+      'caption 说明更早的灰色不是"没有活动"（两种原因：已过期 / 还没开始统计）',
+      !expectCaption || /更早的灰色不是/.test(h365.caption),
+      JSON.stringify({ caption: h365.caption.slice(0, 70), sinceInWindow, retentionBites })
+    );
+    check(
+      '采集起点落在窗口内时，caption 指明是「从 X 开始统计」，而不是含糊地说"没有活动"',
+      !sinceInWindow || /开始统计/.test(h365.caption),
+      JSON.stringify({ since: captionCfg?.since, caption: h365.caption.slice(0, 70) })
+    );
+    /*
+     * 两截文案靠 flex 的 gap 分隔，**视觉上有间距、取出来的文字却会连在一起**
+     * （"共 3952 次服务端从…开始统计"）。渲染截图看不出这个，读屏会照读。
+     */
+    check(
+      'caption 的两截之间有分隔（数字不会和后一句连成一段）',
+      !/[次个](服务端|热度数据|这段)/.test(h365.caption),
+      h365.caption.slice(0, 70)
+    );
+    // 截图前先滚进视野：这个面板在 KPI 与榜单下面，不滚的话截到的是页面顶部，
+    // 文件名却叫 heatmap —— 等于每次都在看一张跟断言无关的图。
+    await evaluate(
+      `document.querySelector('.heatmap-caption')?.scrollIntoView({ block: 'center' })`
+    );
+    await sleep(400);
     console.log('   截图:', await shot('layout-stats-heatmap'));
 
     // 日历是固定跨度：切时间窗不该改变它（KPI 与榜单才跟时间窗走）。

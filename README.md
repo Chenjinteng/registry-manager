@@ -111,12 +111,12 @@ docker compose up -d --build
 | `REGISTRY_PULL_HISTORY_RETENTION_DAYS` | `90` | 拉取历史的保留天数 |
 | `REGISTRY_NOTIFY_TOKEN` | 空 | 热度事件的共享密钥；**不设置则拒绝所有事件** |
 | `REGISTRY_ALLOW_REGISTRY_EVENTS` | `true` | `false` = 不再接收热度事件（历史仍可查） |
-| `REGISTRY_STATS_RETENTION_DAYS` | `90` | 热度数据的保留天数 |
+| `REGISTRY_STATS_RETENTION_DAYS` | `365` | 热度数据的保留天数 |
 | `REGISTRY_STATS_IGNORE_USERAGENTS` | 空 | 不计入热度的客户端 User-Agent 片段（逗号分隔、子串匹配、忽略大小写）。用来排掉常驻的同步工具，见[自动化流量](#自动化流量会把热度刷高) |
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.9.1` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.9.2` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -127,7 +127,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.9.1 .
+docker build -t registry-manager:0.9.2 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -135,7 +135,7 @@ docker build -t registry-manager:0.9.1 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.9.1 .
+  -t registry-manager:0.9.2 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -146,7 +146,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.9.1 .
+  -t registry-manager:0.9.2 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -162,7 +162,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.9.1
+  registry-manager:0.9.2
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -188,8 +188,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.9.1 192.0.2.10:10001/example/registry-manager:0.9.1
-docker push 192.0.2.10:10001/example/registry-manager:0.9.1
+docker tag registry-manager:0.9.2 192.0.2.10:10001/example/registry-manager:0.9.2
+docker push 192.0.2.10:10001/example/registry-manager:0.9.2
 ```
 
 ### 镜像内置
@@ -224,7 +224,7 @@ docker push 192.0.2.10:10001/example/registry-manager:0.9.1
 | `pullHistoryRetentionDays` | `REGISTRY_PULL_HISTORY_RETENTION_DAYS` | `90` | 拉取历史的保留天数（与热度**分开配置**） |
 | `notifyToken` | `REGISTRY_NOTIFY_TOKEN` | 空 | 热度事件的共享密钥。**只从环境变量读**；不设置则拒绝所有事件 |
 | `allowRegistryEvents` | `REGISTRY_ALLOW_REGISTRY_EVENTS` | `true` | 设为 `false` 后不再接收热度事件（历史仍可查询） |
-| `statsRetentionDays` | `REGISTRY_STATS_RETENTION_DAYS` | `90` | 热度数据的保留天数 |
+| `statsRetentionDays` | `REGISTRY_STATS_RETENTION_DAYS` | `365` | 热度数据的保留天数 |
 | `statsIgnoreUseragents` | `REGISTRY_STATS_IGNORE_USERAGENTS` | `[]` | 不计入热度的客户端 User-Agent 片段；环境变量写逗号分隔的字符串，配置文件里可以写成数组 |
 | `allowCredentials` | (env 决定) | - | 是否启用凭据库（由 `REGISTRY_CREDENTIAL_KEY` 是否设置决定） |
 | `credentialsDir` | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与热度数据库都在这里 |
@@ -627,7 +627,7 @@ notifications:
 | --- | --- | --- | --- | --- | --- |
 | `docker/27.3.1 …` | 12 | 12 | 3 周前 | 昨天 | 忽略 |
 | `regclient/regsync (v0.11.5)` | 8230 | 0 | 3 周前 | 2 小时前 | 已忽略 |
-| `registry-manager/0.9.1` | 178 | 0 | 3 周前 | 刚刚 | 本工具 |
+| `registry-manager/0.9.2` | 178 | 0 | 3 周前 | 刚刚 | 本工具 |
 | `some-cron/1.0` | **7** | **7** | **2 天前** | 8 小时前 | **忽略** ← 一眼看到 |
 
 - **行数只跟"有多少个不同的客户端"有关**，与事件量无关 —— 全部 regsync 流量只占一行；
@@ -642,7 +642,14 @@ notifications:
 
 - 热度**从配置生效那天开始**统计，之前的历史补不回来。
 - 失败的拉取（401 / 404）不产生事件，所以热度只反映**成功**的推送与拉取。
-- 保留期默认 90 天（`REGISTRY_STATS_RETENTION_DAYS`），按天聚合。
+- 保留期默认 **365 天**（`REGISTRY_STATS_RETENTION_DAYS`），按天聚合 ——
+  与热度页日历的 12 个月跨度对齐，否则图上更早的格子注定是灰的。
+  代价很小：**热度是按天聚合的**（`天 × 仓库 × tag × pull/push`），行数与流量无关。
+  实测约 125 B/行，70 仓库 / 91 tag 满打满算一年约 6.6 万行 / 8 MB，正常用 1~3 MB。
+  真正随流量增长的是事件去重表，但它走**独立的 7 天窗口**，与这里无关。
+- 日历上更早的灰格子有**两个**原因，别混：**已过期**（保留期比跨度短，改配置即可）
+  与**还没开始统计**（服务端从某天才开始收事件，或刚清空过热度 —— 这种数据从来没存在过）。
+  界面上会按实际情况说明是哪一种。
 - 热度页底部有「最近事件」面板：事件到了但没被计入时，能直接看出原因，
   并能看到每条事件的客户端身份（`User-Agent` / 来源地址 / Host / 账号）。
 - **「最近事件」只是内存里的排查缓存**（默认最近 200 条）：**不落盘，进程重启即清空**，

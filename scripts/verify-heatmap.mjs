@@ -18,6 +18,7 @@ import {
   HEATMAP_ROW_LABEL_WIDTH,
   buildHeatmap,
   buildMonthLabels,
+  heatmapGapNote,
   pickCellSize,
 } from '../web/src/heatmap.ts';
 
@@ -206,6 +207,102 @@ const pts = (map) => Object.entries(map).map(([day, events]) => ({ day, events, 
   check(
     'buildMonthLabels 在空列上不抛（防御性）',
     Array.isArray(buildMonthLabels([], 3)) && buildMonthLabels([], 3).length === 0
+  );
+}
+
+// ───────────────────── 七、那片灰格子为什么是灰的 ─────────────────────
+/*
+ * 这张图最容易让人得出的错误结论是"那片灰 = 那段时间没人用"。灰其实有两个独立原因：
+ *   - **已过期**：保留期比跨度短，更早的被清理了（改配置可解）；
+ *   - **还没开始统计**：服务端从某天才开始收事件（新建的库 / 刚「清空热度数据」过）——
+ *     这一种无解，数据从来没存在过。
+ * 说错方向的代价不是难看：用户会去调一个根本不相干的旋钮，然后还是不亮。
+ */
+{
+  const TODAY = '2026-09-25';
+
+  check(
+    '保留期短于跨度 → 说"已过期"',
+    heatmapGapNote({ days: 365, retentionDays: 90, since: '2020-01-01', today: TODAY }) ===
+      '热度数据只保留 90 天，更早的灰色是已过期，不代表没有活动',
+    String(heatmapGapNote({ days: 365, retentionDays: 90, since: '2020-01-01', today: TODAY }))
+  );
+
+  /*
+   * 这是改默认保留期之后**真实出现**的组合：保留 365 天，但库才建了 90 天。
+   * 此时决定边界是"采集起点"，不是保留期 —— 说"已过期"是错的（那些天从没采集过）。
+   */
+  check(
+    '保留期够长、但采集起点在窗口内 → 说"从 X 开始统计"，不能说"已过期"',
+    heatmapGapNote({ days: 365, retentionDays: 365, since: '2026-06-27', today: TODAY }) ===
+      '服务端从 2026-06-27 开始统计，更早的灰色不是"没有活动"',
+    String(heatmapGapNote({ days: 365, retentionDays: 365, since: '2026-06-27', today: TODAY }))
+  );
+
+  /*
+   * 这是本次改默认保留期之后**真实撞到**的组合：保留 90 天、库也刚建 90 天，
+   * 两个边界只差一天。那时 275 个灰格子里 274 个是"从没采集过" ——
+   * 只说"已过期"会把绝大多数格子解释错，所以两个原因必须都提。
+   */
+  check(
+    '两个原因同时成立（边界不重合）→ 两段都要说，不能只挑一个',
+    heatmapGapNote({ days: 365, retentionDays: 90, since: '2026-06-27', today: TODAY }) ===
+      '服务端从 2026-06-27 开始统计，且热度只保留 90 天；更早的灰色不是"没有活动"',
+    String(heatmapGapNote({ days: 365, retentionDays: 90, since: '2026-06-27', today: TODAY }))
+  );
+
+  check(
+    '采集起点不早于保留边界 → 只有"从没采集过"这一段，不必再提保留期',
+    heatmapGapNote({ days: 365, retentionDays: 90, since: '2026-09-01', today: TODAY })?.includes(
+      '开始统计'
+    ) === true &&
+      heatmapGapNote({ days: 365, retentionDays: 90, since: '2026-09-01', today: TODAY })?.includes(
+        '只保留'
+      ) === false,
+    String(heatmapGapNote({ days: 365, retentionDays: 90, since: '2026-09-01', today: TODAY }))
+  );
+
+  check(
+    '保留期比跨度长 → 保留期不再是原因（不出现"只保留"）',
+    heatmapGapNote({ days: 30, retentionDays: 365, since: '2020-01-01', today: TODAY }) === null,
+    String(heatmapGapNote({ days: 30, retentionDays: 365, since: '2020-01-01', today: TODAY }))
+  );
+
+  check(
+    '跨度和保留期都覆盖了全部历史 → 没有话可说时返回 null（不占位置、不说假话）',
+    heatmapGapNote({ days: 365, retentionDays: 365, since: '2020-01-01', today: TODAY }) === null &&
+      heatmapGapNote({ days: 365, retentionDays: null, since: null, today: TODAY }) === null
+  );
+
+  check(
+    '窗口边界算准：跨度 90 天时，第 90 天前那天不该被说成"过期"',
+    // 跨度 90、保留 90 → 两者都恰好落在窗口起点，无话可说。
+    heatmapGapNote({ days: 90, retentionDays: 90, since: '2020-01-01', today: TODAY }) === null &&
+      heatmapGapNote({ days: 90, retentionDays: 89, since: '2020-01-01', today: TODAY })?.includes(
+        '只保留 89 天'
+      ) === true,
+    String(heatmapGapNote({ days: 90, retentionDays: 89, since: '2020-01-01', today: TODAY }))
+  );
+
+  check(
+    'since 形状不对（脏值）时不让整条提示说错，退化成"未知"',
+    heatmapGapNote({ days: 365, retentionDays: 365, since: 'not-a-date', today: TODAY }) === null &&
+      heatmapGapNote({ days: 365, retentionDays: 365, since: '', today: TODAY }) === null,
+    String(heatmapGapNote({ days: 365, retentionDays: 365, since: 'not-a-date', today: TODAY }))
+  );
+
+  check(
+    '没有保留期配置（null）时不硬说"只保留 null 天"',
+    heatmapGapNote({ days: 365, retentionDays: null, since: '2026-06-27', today: TODAY })?.includes(
+      '开始统计'
+    ) === true,
+    String(heatmapGapNote({ days: 365, retentionDays: null, since: '2026-06-27', today: TODAY }))
+  );
+
+  check(
+    'days 脏值不抛：按 1 天处理 → 窗口只有今天，无话可说',
+    heatmapGapNote({ days: Number.NaN, retentionDays: 90, since: null, today: TODAY }) === null &&
+      heatmapGapNote({ days: 0, retentionDays: 90, since: null, today: TODAY }) === null
   );
 }
 
