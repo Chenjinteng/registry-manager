@@ -1241,7 +1241,11 @@ function JobProgress({ job, detailed = false }: { job: PullJob; detailed?: boole
 
 function JobPhases({ job }: { job: PullJob }) {
   if (!job.phases.length) {
-    return null;
+    // 从数据库读出来的历史任务：**成功任务不存阶段明细**（一次 20 层的拉取有 22 条 phase，
+    // 存了只会把行撑胖），所以展开是空的不是坏了。说一句，别让人对着空白区域猜。
+    return job.fromHistory ? (
+      <div className="pull-phase-empty">历史记录只保留汇总；阶段明细仅在失败 / 取消的任务上保存。</div>
+    ) : null;
   }
   return (
     <div className="pull-phase-list">

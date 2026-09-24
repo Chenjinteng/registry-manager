@@ -414,11 +414,18 @@ export class PullQueue {
    * @param {CredentialStore} [args.credentialStore] 凭据库；提供则任务 / probe 时按 id 取账号密码
    * @param {number}        [args.historyLimit]
    */
-  constructor({ client, credentialStore, proxyStore, historyLimit = 50 }) {
+  constructor({ client, credentialStore, proxyStore, historyLimit = 50, history = null }) {
     this.client = client;
     this.credentialStore = credentialStore;
     this.proxyStore = proxyStore;
     this.historyLimit = Math.max(1, Math.floor(historyLimit));
+    /**
+     * 拉取历史的持久层（`server/db.mjs` 的 Db），可选。
+     *
+     * **可选是刻意的**：队列的运行态本来就不需要数据库，验证脚本（verify-pull.mjs）
+     * 也就能在不建库的情况下跑完整流程。不传时退化成原来的"纯内存历史"。
+     */
+    this.history = history;
     /** @type {Map<string, object>} jobId -> job */
     this.#jobs = new Map();
     /** jobId -> AbortController，仅占 running 的状态 */
@@ -593,6 +600,8 @@ export class PullQueue {
       }
       job.status = 'cancelled';
       job.finishedAt = new Date().toISOString();
+      // 排队中被取消的任务不会走 #run，所以这里也要追写一次历史。
+      this.#settle(job);
       return job;
     }
     // running：标记并 abort
@@ -617,6 +626,29 @@ export class PullQueue {
   }
 
   // ------------------- 调度 -------------------
+
+  /**
+   * 任务到达终态时把它追写进历史库。**幂等**：同一个任务只写一次。
+   *
+   * 为什么只写终态：queued / running 的任务需要高频更新，且只在进程活着时有意义；
+   * 存进历史没有价值，还会把半截数据固化下来。运行态留在内存，历史才是完整的。
+   *
+   * 写失败**不影响任务本身的结果** —— 历史是辅助数据，不能因为落盘失败就改变任务状态。
+   */
+  #settle(job) {
+    if (job.settled) {
+      return;
+    }
+    if (job.status !== 'succeeded' && job.status !== 'failed' && job.status !== 'cancelled') {
+      return;
+    }
+    job.settled = true;
+    try {
+      this.history?.recordPullJob?.(job);
+    } catch (error) {
+      console.error(`[registry-manager] 拉取历史写入失败（任务 ${job.id}）`, error);
+    }
+  }
 
   #trimHistory() {
     // 历史只保留 historyLimit 条；超出按创建时间最旧剔除。
@@ -681,6 +713,8 @@ export class PullQueue {
         `[registry-manager] 拉取任务 ${job.id} 终止：${job.status} ${origin ? `${origin} ` : ''}${cancelled ? '' : `${code} `}${message}`
       );
     } finally {
+      // 此刻终态已确定（成功在 runner 里设、失败/取消在上面的 catch 里设），统一追写历史。
+      this.#settle(job);
       this.#runningAborts.delete(id);
       this.#currentId = null;
       queueMicrotask(() => this.#drain());

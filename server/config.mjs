@@ -45,9 +45,21 @@ const DEFAULTS = {
   port: 8787,
   // 镜像拉取：与"删除"对称的开关，默认开；false 时服务端拒绝所有 /api/pull/* 写入。
   allowPull: true,
-  // 内存里保留的最近任务数（当前任务 + 等待队列 + 历史）；重启即丢。
+  // 内存里保留的最近任务数（当前任务 + 等待队列 + 刚完成的几条）。
+  // **完整历史在 SQLite 里**，由 pullHistoryRetentionDays 决定留多久；这里只管内存窗口。
   pullQueueSize: 50,
-  // 凭据文件目录（加密 JSON 落盘位置；非数据库，仅本工具自用）。
+  // 热度统计的保留天数。
+  statsRetentionDays: 90,
+  // 拉取历史的保留天数。与热度**分开配置**：两者的价值周期不一样。
+  pullHistoryRetentionDays: 90,
+  // 是否接收 registry 推来的热度事件（notifications webhook）。
+  allowRegistryEvents: true,
+  /**
+   * 本工具的数据目录：加密凭据、代理库、以及 SQLite 数据库（热度 + 拉取历史）都放这里。
+   *
+   * 名字沿用 REGISTRY_CREDENTIALS_DIR 是为了不破坏已有部署的挂载与卷；
+   * 语义上它早就不只是"凭据目录"了（错误提示里一直写的是"数据目录"）。
+   */
   credentialsDir: '/app/data',
 };
 
@@ -119,6 +131,24 @@ export function loadConfig() {
       process.env.REGISTRY_PULL_QUEUE_SIZE || file.pullQueueSize,
       DEFAULTS.pullQueueSize
     ),
+    statsRetentionDays: toPositiveInt(
+      process.env.REGISTRY_STATS_RETENTION_DAYS || file.statsRetentionDays,
+      DEFAULTS.statsRetentionDays
+    ),
+    pullHistoryRetentionDays: toPositiveInt(
+      process.env.REGISTRY_PULL_HISTORY_RETENTION_DAYS || file.pullHistoryRetentionDays,
+      DEFAULTS.pullHistoryRetentionDays
+    ),
+    allowRegistryEvents: toBoolean(
+      process.env.REGISTRY_ALLOW_REGISTRY_EVENTS ?? file.allowRegistryEvents,
+      DEFAULTS.allowRegistryEvents
+    ),
+    /**
+     * 热度事件的共享密钥。**只从环境变量读**，与 REGISTRY_CREDENTIAL_KEY 同理：
+     * 密钥不该出现在任何可能被复制、被贴进 issue 的文件里。
+     * 未设置时服务端拒绝所有事件（安全默认值），而不是"无密钥也能收"。
+     */
+    notifyToken: String(process.env.REGISTRY_NOTIFY_TOKEN ?? '').trim(),
     credentialsDir: String(process.env.REGISTRY_CREDENTIALS_DIR || file.credentialsDir || DEFAULTS.credentialsDir),
   };
 

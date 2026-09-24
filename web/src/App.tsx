@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { App as AntdApp, Segmented, Tag, Tooltip } from 'antd';
 import {
   ApiOutlined,
+  BarChartOutlined,
   CloudDownloadOutlined,
   DockerOutlined,
   KeyOutlined,
@@ -13,9 +14,10 @@ import PullPage from './pages/pull-page';
 import CredentialsPage from './pages/credentials-page';
 import ProxiesPage from './pages/proxies-page';
 import SettingsPage from './pages/settings-page';
+import StatsPage from './pages/stats-page';
 import type { AppConfig, Inventory } from './types';
 
-type PageKey = 'images' | 'pull' | 'credentials' | 'proxies' | 'settings';
+type PageKey = 'images' | 'stats' | 'pull' | 'credentials' | 'proxies' | 'settings';
 
 /**
  * 整体布局：
@@ -24,6 +26,7 @@ type PageKey = 'images' | 'pull' | 'credentials' | 'proxies' | 'settings';
  */
 const NAV_ITEMS: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'images', label: '镜像列表', icon: <DockerOutlined /> },
+  { key: 'stats', label: '镜像热度', icon: <BarChartOutlined /> },
   { key: 'pull', label: '镜像拉取', icon: <CloudDownloadOutlined /> },
   { key: 'credentials', label: '凭据管理', icon: <KeyOutlined /> },
   { key: 'proxies', label: '代理管理', icon: <ApiOutlined /> },
@@ -87,6 +90,8 @@ export default function App() {
                 onInventoryChange={setInventory}
                 onGoSettings={() => setPage('settings')}
               />
+            ) : page === 'stats' ? (
+              <StatsPage config={config} onConfigChange={setConfig} />
             ) : page === 'pull' ? (
               <PullPage config={config} />
             ) : page === 'credentials' ? (

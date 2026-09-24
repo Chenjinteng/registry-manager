@@ -324,14 +324,9 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
       <div className="page-header">
         <div>
           <h2 className="page-title">凭据管理</h2>
-          <p className="page-subtitle">
-            管理<strong>外部源</strong> registry 的 basic auth 凭据。本仓库自身的认证属于部署配置，
-            在 <span className="mono">registry.config.json</span>（或{' '}
-            <span className="mono">REGISTRY_USERNAME</span> /{' '}
-            <span className="mono">REGISTRY_PASSWORD</span>）里配置，不在这里管理。
-            文件以 AES-256-GCM 加密落盘（密钥从{' '}
-            <span className="mono">REGISTRY_CREDENTIAL_KEY</span> 派生）；密钥与文件同时丢失 = 不可恢复。
-          </p>
+          {/* 只写"这页能做什么"。为什么不在这里管本仓库自身的认证、文件怎么加密、
+              丢了会怎样 —— 那属于设计说明，见 docs/design.md §3.1 / §3.2。 */}
+          <p className="page-subtitle">管理外部 registry 的 basic auth 凭据。</p>
         </div>
         <div className="page-actions">
           <Button type="primary" icon={<PlusOutlined />} onClick={handleOpenCreate}>
@@ -407,7 +402,7 @@ export default function CredentialsPage({ config: initialConfig }: Props) {
             label={editing ? '密码（留空保留原密码）' : '密码'}
             name="password"
             rules={editing ? [] : [{ required: true, message: '请填写密码' }]}
-            extra="密码不会回显；落盘前以 AES-256-GCM 加密。"
+            extra="密码不会回显；落盘前加密存储。"
           >
             <Input.Password autoComplete="new-password" placeholder="••••••" />
           </Form.Item>

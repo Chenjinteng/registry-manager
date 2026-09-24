@@ -13,6 +13,12 @@ import type {
   ProxyTestResult,
   PullJob,
   PullJobInput,
+  StatsEvents,
+  StatsRepositories,
+  StatsSeries,
+  StatsSummary,
+  StatsTop,
+  StatsTopBy,
 } from './types';
 
 /**
@@ -141,3 +147,25 @@ export const testProxy = (id: string, targetUrl?: string) =>
     method: 'POST',
     body: JSON.stringify({ targetUrl: targetUrl || '' }),
   });
+
+// ── 镜像热度 ──
+// 统计不可用时这些接口返回空结构而不是报错（原因由 /api/config 的 stats* 字段解释），
+// 所以调用方不需要为它们单独做错误降级。
+
+export const fetchStatsSummary = (days: number) =>
+  request<StatsSummary>(`/api/stats/summary?days=${days}`);
+
+export const fetchStatsTop = (days: number, by: StatsTopBy, limit = 20) =>
+  request<StatsTop>(`/api/stats/top?days=${days}&limit=${limit}&by=${by}`);
+
+/** repository 传空串表示全部仓库的合计。 */
+export const fetchStatsSeries = (days: number, repository = '') =>
+  request<StatsSeries>(
+    `/api/stats/series?days=${days}&repository=${encodeURIComponent(repository)}`
+  );
+
+export const fetchRepositoryStats = (days: number) =>
+  request<StatsRepositories>(`/api/stats/repositories?days=${days}`);
+
+export const fetchStatsEvents = (limit = 50) =>
+  request<StatsEvents>(`/api/stats/events?limit=${limit}`);

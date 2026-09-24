@@ -23,6 +23,8 @@ import { RegistryClient, RegistryError } from './registry-client.mjs';
 import { PullQueue } from './puller.mjs';
 import { CredentialStore, pickCredentialPublic, assertCredentialUsable } from './credentials.mjs';
 import { ProxyStore, pickProxyPublic, testProxyConnectivity, buildProxyUrl } from './proxies.mjs';
+import { ActivityStore, verifyNotifyToken, emptySummary } from './events.mjs';
+import { Db } from './db.mjs';
 import { resolve as resolvePath, join } from 'node:path';
 
 const config = loadConfig();
@@ -86,16 +88,91 @@ if (!credentialKey) {
   }
 }
 
+/**
+ * 持久层（SQLite）：**热度统计与拉取历史共用同一个文件、同一个连接**。
+ *
+ * 初始化失败**不阻断启动**：两者都是可重建的辅助数据，写不进磁盘不该让整个界面打不开。
+ * 与凭据库（缺了它连拉取都用不了）的严重程度不同，所以处理方式也不同。
+ *
+ * 注意**凭据与代理不在这里** —— 它们仍是整份加密的独立 JSON 文件，
+ * 进表会把 name / registry_url / username 变成明文。理由见 docs/design.md。
+ */
+/** @type {{code: string, message: string} | null} */
+let statsInitError = null;
+let db = null;
+try {
+  db = new Db({ filePath: resolvePath(join(config.credentialsDir, 'registry-manager.db')) });
+} catch (error) {
+  statsInitError = {
+    code: 'STATS_STORE_INIT_FAILED',
+    message:
+      `数据库初始化失败：${error.message}。` +
+      `它位于数据目录 ${config.credentialsDir}（需要存在且对运行用户可写）。` +
+      `其余功能不受影响；修好目录后重启即可启用热度统计与拉取历史。`,
+  };
+  console.error(`[registry-manager] ${statsInitError.message}`);
+}
+
+// 热度：数据库不可用时整个 store 为 null，查询接口退化成空结构（页面按 /api/config 解释原因）。
+const activityStore = db ? new ActivityStore({ db, retentionDays: config.statsRetentionDays }) : null;
+
+/**
+ * 清理超期数据（启动时一次 + 每 24 小时一次）。
+ *
+ * 两类的保留期是**独立配置**，所以分别清理、分别记日志 —— 合并的话迟早会把
+ * 其中一个的保留期套到另一个头上。
+ */
+function cleanupExpired() {
+  const result = { activity: 0, dedup: 0, pulls: 0 };
+  try {
+    if (activityStore) {
+      Object.assign(result, activityStore.cleanup());
+    }
+  } catch (error) {
+    console.error('[registry-manager] 热度数据清理失败', error);
+  }
+  try {
+    if (db) {
+      Object.assign(result, db.cleanupPullJobs({ retentionDays: config.pullHistoryRetentionDays }));
+    }
+  } catch (error) {
+    console.error('[registry-manager] 拉取历史清理失败', error);
+  }
+  return result;
+}
+
+// 启动时先清一次：保留期被改小时，旧数据不该一直留着。
+{
+  const removed = cleanupExpired();
+  if (removed.pulls > 0) {
+    console.log(`[registry-manager] 拉取历史清理：删除 ${removed.pulls} 条超期任务`);
+  }
+}
+
 const pullQueue = new PullQueue({
   client,
   credentialStore: credentialStore ?? undefined,
   proxyStore: proxyStore ?? undefined,
   historyLimit: config.pullQueueSize,
+  // 拉取历史：数据库不可用时退化成原来的"纯内存历史"，不影响拉取本身。
+  history: db,
 });
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '32kb' }));
+/**
+ * 热度事件端点的 body 上限单独放宽（registry 可能把多条事件放进同一个信封）。
+ * 该路径在全局解析器里被跳过，改由路由自己解析 —— 这样**密钥校验可以发生在解析之前**，
+ * 未授权的请求不消耗解析成本。
+ */
+const EVENT_PATH = '/api/registry-events';
+app.use((req, res, next) => {
+  if (req.path === EVENT_PATH) {
+    next();
+    return;
+  }
+  express.json({ limit: '32kb' })(req, res, next);
+});
 
 function ok(res, payload = {}) {
   res.json({ success: true, code: 'OK', message: '', ...payload });
@@ -140,6 +217,19 @@ app.get('/api/config', (req, res) => {
       // 凭据库不可用时把原因一并给出，页面才能显示真正的问题，
       // 而不是一律猜“没配 KEY”。
       credentialError: credentialInitError,
+      /** 热度统计是否可用（开关打开 **且** 数据库初始化成功）。 */
+      statsEnabled: Boolean(activityStore) && config.allowRegistryEvents,
+      /** 是否允许接收 registry 推来的事件（REGISTRY_ALLOW_REGISTRY_EVENTS）。 */
+      allowRegistryEvents: config.allowRegistryEvents,
+      /** 数据库初始化失败的原因；正常时为 null。 */
+      statsError: statsInitError,
+      /** 是否配了热度事件的共享密钥。**只暴露布尔，密钥绝不出接口**。 */
+      notifyTokenConfigured: Boolean(config.notifyToken),
+      /** 热度数据最早的一天，用来在空状态里说明“从什么时候开始有数据”。 */
+      statsSince: activityStore ? activityStore.earliestDay() : null,
+      statsRetentionDays: config.statsRetentionDays,
+      /** 拉取历史的保留天数（与热度分开配置）。 */
+      pullHistoryRetentionDays: config.pullHistoryRetentionDays,
     },
   });
 });
@@ -398,12 +488,35 @@ function resolveDestReference(body) {
   return { sourceRepo, sourceTag, destRepo, destTag };
 }
 
+/** 任务列表单次最多返回多少条历史（内存里的活任务不计入这个上限）。 */
+const PULL_HISTORY_LIMIT = 500;
+
+/**
+ * 任务列表：**内存里的活任务 + 数据库里的历史**。
+ *
+ * 内存只管"这次运行中的"（queued / running 与刚完成的几条），重启后是空的；
+ * 历史在库里，所以重启也查得到 —— 这正是把拉取历史落库的目的。
+ * 两边按 id 去重（刚完成的任务两边都有），以内存那份为准（它带着完整的 phases）。
+ */
+function collectPullJobs() {
+  const live = pullQueue.list();
+  if (!db) {
+    return live;
+  }
+  const seen = new Set(live.map((job) => job.id));
+  const history = db.listPullJobs({ limit: PULL_HISTORY_LIMIT });
+  return [...live, ...history.filter((job) => !seen.has(job.id))].sort((a, b) =>
+    String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? ''))
+  );
+}
+
 app.get('/api/pull/jobs', (req, res) => {
-  ok(res, { data: pullQueue.list() });
+  ok(res, { data: collectPullJobs() });
 });
 
 app.get('/api/pull/jobs/:id', (req, res) => {
-  const job = pullQueue.get(readPullJobId(req));
+  const id = readPullJobId(req);
+  const job = pullQueue.get(id) ?? db?.getPullJob(id) ?? null;
   if (!job) {
     fail(res, new RegistryError('任务不存在', 'JOB_NOT_FOUND'));
     return;
@@ -428,8 +541,11 @@ app.post('/api/pull/jobs/:id/cancel', ensurePullAllowed, (req, res) => {
 app.delete('/api/pull/jobs/:id', ensurePullAllowed, (req, res) => {
   const id = readPullJobId(req);
   try {
-    const removed = pullQueue.remove(id);
-    if (!removed) {
+    // 顺序要紧：内存里的先删（运行中的任务会在这里抛错，不该被删），再删库里的历史。
+    // 只删内存不删库的话，重启后这条任务会"复活"。
+    const inMemory = pullQueue.remove(id);
+    const inHistory = db ? db.removePullJob(id) : false;
+    if (!inMemory && !inHistory) {
       fail(res, new RegistryError('任务不存在', 'JOB_NOT_FOUND'));
       return;
     }
@@ -650,6 +766,137 @@ app.post('/api/proxies/:id/test', ensureProxiesAvailable, async (req, res) => {
   fail(res, new RegistryError(result.error, 'PROXY_TEST_FAILED'));
 });
 
+// ───────────────────────────── 热度统计 ─────────────────────────────
+
+/** 读取并夹紧一个整数查询参数。 */
+function readInt(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(parsed, min), max);
+}
+
+/**
+ * registry 推来的热度事件。
+ *
+ * 这是**唯一面向机器的写接口**（Distribution 的 notifications.endpoints 会 POST 到这里），
+ * 所以和浏览器接口刻意有三点不同：
+ *   - **先验共享密钥再解析 body**，未授权的请求不消耗解析成本；
+ *   - **失败返回真实的 HTTP 状态码** —— registry 靠状态码决定要不要重试与告警，
+ *     统一回 200 会让"配置写错了"彻底静默，用户永远等不到热度数据。
+ *   - 成功仍带 `{success}` 信封，与其它接口一致（registry 不看 body）。
+ */
+app.post(
+  EVENT_PATH,
+  (req, res, next) => {
+    if (!config.allowRegistryEvents) {
+      res.status(503).json({
+        success: false,
+        code: 'EVENTS_DISABLED',
+        message: '服务端已关闭热度事件接收（REGISTRY_ALLOW_REGISTRY_EVENTS=false）。',
+      });
+      return;
+    }
+    if (!activityStore) {
+      res.status(503).json({
+        success: false,
+        code: 'STATS_UNAVAILABLE',
+        message: statsInitError?.message ?? '热度统计不可用。',
+      });
+      return;
+    }
+    const verdict = verifyNotifyToken(req.get('authorization'), config.notifyToken);
+    if (!verdict.ok) {
+      // 既不回显收到的值，也不回显期望值。
+      res.status(401).json({ success: false, code: verdict.code, message: verdict.message });
+      return;
+    }
+    next();
+  },
+  (req, res, next) => {
+    // `type: () => true` 是必需的，不是偷懒：Distribution 发事件时用的
+    // `Content-Type` 是 `application/vnd.docker.distribution.events.v2+json`，
+    // 而 express.json 默认只解析 `application/json` —— 不放开的话 req.body 会是 {}，
+    // 每条事件都被静默吞掉，接口还回 200，用户永远等不到热度数据。
+    express.json({ limit: '256kb', type: () => true })(req, res, (error) => {
+      if (error) {
+        res.status(400).json({
+          success: false,
+          code: 'INVALID_REQUEST',
+          message: `热度事件体无法解析：${error.message}`,
+        });
+        return;
+      }
+      next();
+    });
+  },
+  (req, res) => {
+    // 与上面的放开配套：body 解不出来时**大声拒绝**，而不是当成"零条事件"回 200。
+    // 静默成功会让配置问题完全不可见 —— 接口全绿、热度永远是空的。
+    if (!Array.isArray(req.body?.events)) {
+      res.status(400).json({
+        success: false,
+        code: 'INVALID_REQUEST',
+        message: '热度事件体缺少 events 数组。请确认 registry 的 notifications 配置指向本接口。',
+      });
+      return;
+    }
+    try {
+      ok(res, { data: activityStore.ingest(req.body) });
+    } catch (error) {
+      fail(res, error);
+    }
+  }
+);
+
+/**
+ * 热度查询。
+ *
+ * 统计不可用（数据库初始化失败）或尚未收到任何事件时，一律返回**空结构**而不是报错 ——
+ * 页面的"未启用"空状态依赖 /api/config 里的 statsEnabled / statsError 来解释原因，
+ * 不该让查询接口变成一个错误弹窗。
+ */
+app.get('/api/stats/summary', (req, res) => {
+  const days = readInt(req.query.days, 30, 1, 3650);
+  ok(res, { data: activityStore ? activityStore.summary(days) : emptySummary(days) });
+});
+
+app.get('/api/stats/top', (req, res) => {
+  const days = readInt(req.query.days, 30, 1, 3650);
+  const limit = readInt(req.query.limit, 20, 1, 500);
+  const by = req.query.by === 'tag' ? 'tag' : 'repository';
+  ok(res, {
+    data: { days, by, items: activityStore ? activityStore.top({ days, limit, by }) : [] },
+  });
+});
+
+app.get('/api/stats/series', (req, res) => {
+  const days = readInt(req.query.days, 30, 1, 3650);
+  const repository = String(req.query.repository ?? '').trim();
+  ok(res, {
+    data: { days, repository, points: activityStore ? activityStore.series({ days, repository }) : [] },
+  });
+});
+
+/** 全部**有热度**的仓库，供镜像列表页做一次 join（返回 map 便于前端 O(1) 查）。 */
+app.get('/api/stats/repositories', (req, res) => {
+  const days = readInt(req.query.days, 30, 1, 3650);
+  const map = activityStore ? activityStore.forRepositories(days) : new Map();
+  ok(res, { data: { days, items: Object.fromEntries(map) } });
+});
+
+/** 最近收到的原始事件。**排查用**：事件没到、口径不对，都靠它定位。 */
+app.get('/api/stats/events', (req, res) => {
+  const limit = readInt(req.query.limit, 50, 1, 200);
+  ok(res, {
+    data: {
+      items: activityStore ? activityStore.recentEvents(limit) : [],
+      totals: activityStore ? activityStore.totals() : { accepted: 0, rejected: 0, buffered: 0 },
+    },
+  });
+});
+
 // 生产态同源托管前端；开发态由 Vite 提供页面。
 const distDir = resolve(import.meta.dirname, '../web/dist');
 if (existsSync(distDir)) {
@@ -679,15 +926,66 @@ const server = app.listen(config.port, () => {
   if (!existsSync(distDir)) {
     console.log('[registry-manager] 未发现 web/dist，开发态请访问 Vite 地址（默认 http://127.0.0.1:5273）');
   }
+  if (activityStore) {
+    console.log(
+      `[registry-manager] 热度统计已启用（保留 ${config.statsRetentionDays} 天）` +
+        (config.allowRegistryEvents ? '' : '，但已关闭事件接收')
+    );
+    if (!config.notifyToken) {
+      // 安全默认值：没配密钥时拒绝所有事件。必须说清楚，否则用户会以为配好了 registry 就有数据。
+      console.warn(
+        '[registry-manager] 未设置 REGISTRY_NOTIFY_TOKEN，热度事件会被全部拒绝。' +
+          '配置该变量并在 registry 的 notifications.headers.Authorization 里填同一个值，重启后开始统计。'
+      );
+    } else if (activityStore.earliestDay() === null) {
+      /*
+       * "配了一半"的典型情形：这边设了密钥，但 registry 侧没加 notifications ——
+       * 页面永远是空的，而日志里没有任何线索。这是最容易卡住人的一种状态，主动说一句。
+       */
+      console.warn(
+        '[registry-manager] 还没收到过任何热度事件。热度需要 registry 侧配合：' +
+          '在它的 config.yml 里加一段 notifications 指向本服务的 /api/registry-events、' +
+          '用同一个密钥，然后**重启 registry 容器**（Distribution 没有配置热重载）。' +
+          '步骤见 README 的「镜像热度」一节。'
+      );
+    }
+  } else if (statsInitError) {
+    console.warn(`[registry-manager] 热度统计不可用（${statsInitError.code}）。其余功能不受影响。`);
+  }
+  if (db) {
+    console.log(
+      `[registry-manager] 拉取历史已落库（保留 ${config.pullHistoryRetentionDays} 天），重启不再丢失`
+    );
+  }
 });
+
+// 每天清一次超期数据。unref 掉，避免它阻止进程退出。
+// 每 24 小时清一次超期数据（热度 + 拉取历史，各自的保留期）。unref 掉，避免它阻止进程退出。
+const cleanupTimer = db
+  ? setInterval(() => {
+      const removed = cleanupExpired();
+      if (removed.activity > 0 || removed.dedup > 0 || removed.pulls > 0) {
+        console.log(
+          `[registry-manager] 数据清理：热度聚合 ${removed.activity} 行、去重 ${removed.dedup} 行、拉取历史 ${removed.pulls} 条`
+        );
+      }
+    }, 24 * 3600 * 1000)
+  : null;
+cleanupTimer?.unref();
 
 // 容器里 docker stop 发的是 SIGTERM。先停止接收新连接、等在途请求结束再退出，
 // 避免部署重启时打断正在进行的扫描。
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
     console.log(`[registry-manager] 收到 ${signal}，正在关闭…`);
-    server.close(() => process.exit(0));
+    clearInterval(cleanupTimer);
+    const shutdown = () => {
+      // 让 SQLite 走完 WAL 检查点，避免容器重启后留下 -wal / -shm 残留文件。
+      activityStore?.close();
+      process.exit(0);
+    };
+    server.close(shutdown);
     // 兜底：连接迟迟不释放时强制退出，避免容器卡在 stopping。
-    setTimeout(() => process.exit(0), 5000).unref();
+    setTimeout(shutdown, 5000).unref();
   });
 }

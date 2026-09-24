@@ -17,7 +17,7 @@ services:
         #   docker compose build --build-arg HTTPS_PROXY=http://<host>:<port>
 
     # 要推到自己的 registry，在 .env 里把 IMAGE 改成带前缀的完整名
-    image: ${IMAGE:-registry-manager:0.3.1}
+    image: ${IMAGE:-registry-manager:0.4.0}
     container_name: registry-manager
     restart: unless-stopped
 
@@ -39,13 +39,27 @@ services:
       REGISTRY_ALLOW_DELETE: ${REGISTRY_ALLOW_DELETE:-true}
       # 镜像拉取：设为 false 后服务端拒绝所有 /api/pull/* 写入（GET 仍可读）
       REGISTRY_ALLOW_PULL: ${REGISTRY_ALLOW_PULL:-true}
-      # 内存里保留的最近任务数；重启即丢
+      # 内存里保留的最近任务数（当前 + 排队 + 刚完成的几条）。
+      # 完整历史在 SQLite 里，由下面的 REGISTRY_PULL_HISTORY_RETENTION_DAYS 决定留多久。
       REGISTRY_PULL_QUEUE_SIZE: ${REGISTRY_PULL_QUEUE_SIZE:-50}
+      # 拉取历史的保留天数。历史落在 SQLite 里，**重启不再丢失**。
+      REGISTRY_PULL_HISTORY_RETENTION_DAYS: ${REGISTRY_PULL_HISTORY_RETENTION_DAYS:-90}
+      # 镜像热度：接收 registry 推来的 push/pull 事件（Distribution 的 notifications webhook）。
+      # ⚠️ 光在这里设密钥**不会**让热度工作：registry 的 config.yml 里也必须加一段 notifications
+      #    指向本服务、用同一个密钥，改完还要**重启 registry 容器**。步骤见 README「镜像热度」。
+      # 密钥必须与 registry 侧 notifications.headers.Authorization 里的值一致；
+      # **不设置就拒绝所有事件**（安全默认值），页面会提示怎么配。
+      REGISTRY_NOTIFY_TOKEN: ${REGISTRY_NOTIFY_TOKEN:-}
+      # 设为 false 后不再接收热度事件（已统计的历史仍可查询）
+      REGISTRY_ALLOW_REGISTRY_EVENTS: ${REGISTRY_ALLOW_REGISTRY_EVENTS:-true}
+      # 热度数据的保留天数
+      REGISTRY_STATS_RETENTION_DAYS: ${REGISTRY_STATS_RETENTION_DAYS:-90}
       # 凭据库：加密 JSON 落盘；必填密钥，否则凭据库不可用（拉取仍可匿名工作）
       REGISTRY_CREDENTIAL_KEY: ${REGISTRY_CREDENTIAL_KEY:?请设置 REGISTRY_CREDENTIAL_KEY；任意随机 32+ 字符字符串，启动后切勿丢失}
+      # 数据目录：加密凭据、代理库，以及热度统计的 SQLite 文件都放这里
       REGISTRY_CREDENTIALS_DIR: ${REGISTRY_CREDENTIALS_DIR:-/app/data}
 
-    # 凭据库要持久化，否则容器一重建凭据就没了。
+    # 数据目录要持久化，否则容器一重建凭据、代理、热度历史就都没了。
     # 命名卷在首次挂载空目录时会沿用镜像里 /app/data 的属主（node:node），
     # 所以非 root 的 node 用户能写。若改用 bind mount，宿主机目录的属主
     # 必须是 uid 1000，否则同样会以 EACCES / EPERM 初始化失败。

@@ -56,6 +56,21 @@ export interface AppConfig {
   credentialsDir: string;
   /** 凭据库不可用时的具体原因；可用时为 null。 */
   credentialError: { code: string; message: string } | null;
+  /**
+   * 热度统计是否可用：开关打开**且**统计库初始化成功。
+   * false 时热度页要显示解释性空状态，而不是报错。
+   */
+  statsEnabled: boolean;
+  /** false 时服务端关闭了事件接收（REGISTRY_ALLOW_REGISTRY_EVENTS=false）。 */
+  allowRegistryEvents: boolean;
+  /** 统计库初始化失败的原因；正常时为 null。用来区分「坏了」和「还没配」。 */
+  statsError: { code: string; message: string } | null;
+  /** 是否配了事件共享密钥；密钥本身不回传。false 时事件会被全部拒绝。 */
+  notifyTokenConfigured: boolean;
+  /** 热度数据最早的一天（YYYY-MM-DD）；从未收到事件时为 null。 */
+  statsSince: string | null;
+  /** 热度数据的保留天数。 */
+  statsRetentionDays: number;
 }
 
 export interface ApiResult<T> {
@@ -110,6 +125,11 @@ export interface PullJob {
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
+  /**
+   * 这条任务是**从数据库的历史里读出来的**（不是本次运行内存里的）。
+   * 历史任务没有实时进度，且成功任务不保留阶段明细 —— 界面据此区别对待。
+   */
+  fromHistory?: boolean;
 }
 
 export interface PullJobInput {
@@ -225,4 +245,93 @@ export interface ProxyTestResult {
   targetUrl: string;
   registryApiVersion?: string | null;
   error?: string;
+}
+
+/** 热度统计窗口。页面只提供这三档，服务端本身接受任意天数。 */
+export type StatsWindow = 7 | 30 | 90;
+
+/** Top 榜单的聚合维度：按仓库或按 tag。 */
+export type StatsTopBy = 'repository' | 'tag';
+
+/** 总览（`/api/stats/summary`）。 */
+export interface StatsSummary {
+  days: number;
+  total: number;
+  repositories: number;
+  tags: number;
+  lastAt: string | null;
+  push: number;
+  pull: number;
+}
+
+/**
+ * Top 榜单条目。
+ * `by=repository` 时带 `tags`，`by=tag` 时带 `tag` —— 两个字段因此都是可选的。
+ */
+export interface StatsTopItem {
+  repository: string;
+  tag?: string;
+  events: number;
+  pull: number;
+  push: number;
+  tags?: number;
+  lastAt: string | null;
+}
+
+export interface StatsTop {
+  days: number;
+  by: StatsTopBy;
+  items: StatsTopItem[];
+}
+
+/** 按天趋势的一个点。`day` 是 YYYY-MM-DD。 */
+export interface StatsSeriesPoint {
+  day: string;
+  events: number;
+  pull: number;
+  push: number;
+}
+
+export interface StatsSeries {
+  days: number;
+  repository: string;
+  points: StatsSeriesPoint[];
+}
+
+/** 单个仓库在窗口内的热度，供镜像列表页做一次 join。 */
+export interface StatsRepositoryStat {
+  events: number;
+  pull: number;
+  push: number;
+  lastAt: string | null;
+}
+
+export interface StatsRepositories {
+  days: number;
+  /** 只包含**有热度**的仓库；查不到的仓库表示窗口内没有事件。 */
+  items: Record<string, StatsRepositoryStat>;
+}
+
+/** 最近收到的原始事件（排查用）。 */
+export interface StatsEventItem {
+  /** 服务端收到事件的时间（ISO8601）。 */
+  at: string;
+  /** registry 自己的事件时间戳；小数位不固定，交给 new Date 解析。 */
+  eventAt: string;
+  id: string;
+  action: string;
+  method: string;
+  mediaType: string;
+  repository: string;
+  tag: string;
+  /** 未计入时的原因（例如 NOT_MANIFEST / METHOD_GET）；计入时为 OK。 */
+  reason: string;
+  counted: boolean;
+  /** true 表示 event.id 之前已经记过，本次按幂等丢弃。 */
+  duplicate?: boolean;
+}
+
+export interface StatsEvents {
+  items: StatsEventItem[];
+  totals: { accepted: number; rejected: number; buffered: number };
 }

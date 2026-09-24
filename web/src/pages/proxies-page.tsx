@@ -309,12 +309,9 @@ export default function ProxiesPage({ config: initialConfig }: Props) {
       <div className="page-header">
         <div>
           <h2 className="page-title">代理管理</h2>
-          <p className="page-subtitle">
-            维护访问<strong>外部源</strong>用的 HTTP 代理，拉取任务里可按名字选用。本 registry
-            自身的代理属于部署配置，在 <span className="mono">registry.config.json</span> 的{' '}
-            <span className="mono">proxy</span>（或{' '}
-            <span className="mono">REGISTRY_PROXY</span>）里配，不在这里管理。
-          </p>
+          {/* 只写"这页能做什么"。本 registry 自身的代理配在哪、为什么分两处 ——
+              属于设计说明，见 docs/design.md §3.1。 */}
+          <p className="page-subtitle">管理访问外部源时使用的 HTTP 代理。</p>
         </div>
         <div className="page-actions">
           <Button type="primary" icon={<PlusOutlined />} onClick={handleOpenCreate}>
@@ -406,7 +403,7 @@ export default function ProxiesPage({ config: initialConfig }: Props) {
           <Form.Item
             label={editing ? '密码（留空保留原密码）' : '密码（可选）'}
             name="password"
-            extra="密码不会回显；落盘前与凭据库一样以 AES-256-GCM 加密。"
+            extra="密码不会回显；落盘前加密存储。"
           >
             <Input.Password autoComplete="new-password" placeholder="••••••" />
           </Form.Item>

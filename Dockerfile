@@ -87,7 +87,7 @@ COPY --chown=node:node --from=builder /app/web/dist ./web/dist
 # 这样无论上下文带来的权限位是什么，node 用户都能读。
 RUN chmod -R a+rX /app/server /app/web/dist /app/package.json
 
-# 凭据库落盘目录。
+# 数据目录：凭据库、代理库与热度统计的 SQLite 文件都落在这里。
 #
 # 必须在镜像里就建好并交给 node 用户：WORKDIR /app 是 root 所有（755），
 # 非 root 的 node 用户无权在其中 mkdir，否则凭据库初始化会以
@@ -104,4 +104,6 @@ EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/api/config').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "server/index.mjs"]
+# --disable-warning 与 package.json 的 start 脚本保持一致：node:sqlite 在 Node 22 上
+# 仍标注实验性，启动时打一条 ExperimentalWarning 会盖住真正有用的告警。
+CMD ["node", "--disable-warning=ExperimentalWarning", "server/index.mjs"]

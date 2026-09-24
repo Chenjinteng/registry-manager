@@ -11,8 +11,18 @@
 没有后端框架、没有 ORM、没有 i18n 体系。不要把大平台的模块、权限、国际化
 或服务端框架引进来 —— 这个工具的卖点就是"小到能看懂、能单独跑起来"。
 
-刻意不做的事：**没有登录，没有数据库，没有多实例配置**。一次管理一个 registry。
+刻意不做的事：**没有登录，没有多实例配置**。一次管理一个 registry。
 这些是产品决定，不是未完成项；要加先问。
+
+关于"数据库"：产品决定是**不引入任何需要运维的数据库服务**，不是"一行 SQL 都不许写"。
+`data/registry-manager.db` 里装**两类**数据：热度统计（`activity_daily` / `event_seen`）
+与**拉取历史**（`pull_jobs`，只在任务到终态时写；运行态留内存）。
+SQL 全部集中在 `server/db.mjs`（类名就叫 `Db`）。**不要**因此往上加 ORM，也不要换成 Postgres。
+
+**凭据与代理刻意不进这个库**（仍是整份 AES-256-GCM 加密的独立 JSON）。
+别为了"存储统一"把它们搬进去：进表会把 `name` / `registry_url` / `username` 变成明文，
+是从"整份不可读"退化成"元数据全暴露"，而且会让敏感数据与非敏感数据混进同一个备份单元。
+理由见 `docs/design.md` §4.1 —— **要动先问。**
 
 ## 版本号规则
 
@@ -72,8 +82,14 @@
 
 **其它**
 
-- `tags/list?n=` 的分页**不生效**（Distribution 2.x），一次返回全量；`_catalog` 的分页生效
-  （用 `?n=&last=`，并在 `Link` 头给下一页）。
+- `tags/list` 的分页**版本相关**：**v2.8.3 上不生效**（传 `n` 也只返回全量）、
+  **v3.1.0+ 生效**（传 `n` 时在 `Link` 头给下一页，实测确认）。调用方**刻意不传 `n`**，
+  因此两个版本行为一致 —— 别顺手加上分页参数。`_catalog` 的分页在两个版本都生效
+  （`?n=&last=`；代码按返回条数判断是否继续，不依赖 `Link` 头）。
+- **拿 manifest（`GET`/`HEAD /v2/<name>/manifests/<ref>`）必须带 `Accept`**，
+  否则 registry 回 **404**（不是 400 也不是 406）。用裸 curl 探活会把"存在"读成"不存在"。
+  `registry-client.mjs` 的 `MANIFEST_ACCEPT` 覆盖 OCI index/manifest 与 Docker list/v2 四种类型，
+  所有 manifest 请求都必须带上。
 - 没有 OCI referrers API（`/v2/<name>/referrers/<digest>` → 404）。
 - **没有删除仓库的接口**，也没有删除 tag 的接口。删完 manifest 后仓库目录会留在 `_catalog`
   里、表现为 `tagCount: 0`，只能去 registry 宿主机删存储目录。
@@ -124,6 +140,29 @@
 - `AbortController` **穿不透正在建立的 CONNECT 隧道**：代理能建 TCP 但到不了目标时，
   请求会永远挂着。超时必须用 `Promise.race` 之类硬兜底，只靠 abort 会永久卡住。
 
+**通知 / 热度**（`notifications.endpoints`，是热度统计唯一的结构化数据源）
+
+- Distribution 在 **manifest 的 push / pull** 时回调 webhook，**layer（blob）也会发**。
+- **`action == "pull"` 不等于"有人在拉镜像"**：`docker push` 在探测 blob 是否存在时
+  会发出 `action: "pull"` + `method: "HEAD"` 的事件。实测推一个 3 层镜像共 7 条事件，
+  其中 3 条是假的 pull。不按 mediaType 过滤，推一个 20 层的镜像会凭空多出 20 次"拉取"。
+- **一次 `docker pull` 会产生十几条事件**。实测 `postgres:15`（15 层）共 17 条：
+  1 条 tag 解析 + 1 条内容下载 + 15 条 blob。
+- **带 tag 的是 `HEAD`，不是 `GET`**：Docker 先按 tag `HEAD` 拿 digest，再按 digest `GET` 取内容，
+  所以 GET 那条既没有 `tag`、`url` 也已经是 digest。判据必须是 `method ∈ {HEAD, PUT}`；
+  写成 `{GET, PUT}` 会留下无 tag 的 GET、丢掉带 tag 的 HEAD。
+- **blob 事件的 `target.mediaType` 是 `application/octet-stream`**（不是 layer 的 media type）。
+  官网示例里的 `ignoredmediatypes: [application/octet-stream]` 就是为它准备的。
+- `request.addr` 在端口映射下是 **Docker 网桥网关**（如 `172.19.0.1`），**不是真实客户端**
+  → 不要用它做客户端识别。
+- `actor` 未认证时是 `{}`；`id` 是 **UUIDv7**（适合做去重键）；`timestamp` 的小数位数
+  **不固定**（9 位 / 8 位混用），但 `new Date()` 能正确截断，**不需要**像 image config 的
+  `created` 那样手动处理。
+- 队列是**内存态**：registry 重启会丢未发送的事件；且有 `threshold` / `backoff` 重试
+  → **必须按 `event.id` 幂等**（去重与计数放在同一个事务里），否则重复累加。
+- 一个信封**可以包含多条事件**（实测每条 1 条），接收端必须按数组处理。
+- **`action == "pull"` 的过滤不能替代 `method` 过滤**：两者必须同时在。
+
 ## 破坏性操作红线
 
 这个工具会删掉真实的基础设施镜像（k8s 组件、数据库、平台自身镜像）。
@@ -170,10 +209,31 @@ node server/index.mjs
 
 ## 视觉约定
 
-- 结构：`header`（sticky 顶栏）→ `main`（`p-4`）→ **顶部横向 `Segmented` 导航** → 内容区。
+- **界面上只写"这里能做什么"，不写"为什么这么实现"。**
+  - 页面副标题**一句话**，不解释机制。实现原理（加密算法名、webhook 口径、
+    协议细节、部署级配置为什么分两处）写到 `README.md` 或 `docs/design.md`。
+  - 两个理由都不是审美：一是原理不该给使用者看（否则要先读懂源码才能用工具），
+    二是**界面上的实现细节不会随代码更新而漂移**，最后会变成一句看着权威、
+    其实已经过时的说明。
+  - 破坏性操作前**要写后果**（"删除后该镜像无法再被拉取"）—— 那是"会发生什么"，
+    不是"为什么这么实现"，必须留。
+  - 详见 `docs/design.md` §2。
+- **这个项目没有 Tailwind。** 样式层是 `web/src/app.css` 里的普通 CSS 类
+  （`.page` / `.panel` / `.app-main` / `.metric-grid` / `.page-header` …），
+  配 `web/src/theme.css` 的语义 token。**写 Tailwind 类名（`p-4` / `flex` / `gap-4`）会静默失效**
+  —— 没有构建期报错，只是样式不生效，排查起来很费时间。
+  （本文件早先写成 `main（p-4）`，那是错的：`.app-main` 的 padding 来自 app.css 的规则。
+  这类"看起来像 Tailwind"的写法多半是从别的项目抄过来的，别再抄回去。）
+- 结构：`header`（sticky 顶栏）→ `main` → **顶部横向 `Segmented` 导航** → 内容区。
   应用内导航在**顶部**，不要改成左侧栏。
 - 颜色一律用 `web/src/theme.css` 里的语义 token（`var(--color-*)`），不要写死色值。
 - KPI 卡：图标块 28×28（语义色底）+ 13px 标签 + 粗体数值，样式见 `app.css` 的 `.metric-card`。
+- 手写 SVG 图表的约定：
+  - **几何与分档逻辑抽到 `web/src/*.ts`，不要在组件里算**。渲染结果没法靠读代码确认，
+    抽出来才能用 `scripts/verify-heatmap.mjs` 那套断言钉住（日历的错法是"长得不对"，不抛异常）。
+  - 坐标常量（`viewBox`、留白、格宽）**单点定义**。
+  - **方格图（如热度日历）用固定像素尺寸 + `max-width`，不要 `width:100%` 拉伸** ——
+    拉伸会把方格变成矩形，失去"日历"的读法。折线图才需要 `width:100%` + `vector-effect: non-scaling-stroke`。
 
 ## 容器
 
@@ -194,8 +254,10 @@ node server/index.mjs
   | `REGISTRY_URL` / `REGISTRY_NAME` | 目标 registry 与展示名 |
   | `REGISTRY_PROXY` / `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | **本 registry** 的代理与认证（部署级） |
   | `REGISTRY_CACHE_TTL_SECONDS` / `REGISTRY_ALLOW_DELETE` | 缓存时长、只读模式 |
-  | `REGISTRY_ALLOW_PULL` / `REGISTRY_PULL_QUEUE_SIZE` | 是否允许拉取、任务保留条数 |
-  | `REGISTRY_CREDENTIAL_KEY` / `REGISTRY_CREDENTIALS_DIR` | 加密存储的密钥与目录（外部源凭据/代理） |
+  | `REGISTRY_ALLOW_PULL` / `REGISTRY_PULL_QUEUE_SIZE` | 是否允许拉取、**内存里**保留的任务条数 |
+  | `REGISTRY_PULL_HISTORY_RETENTION_DAYS` | 拉取历史的保留天数（落 SQLite，与热度分开配置） |
+  | `REGISTRY_NOTIFY_TOKEN` / `REGISTRY_ALLOW_REGISTRY_EVENTS` / `REGISTRY_STATS_RETENTION_DAYS` | 热度事件的共享密钥、是否接收、保留天数 |
+  | `REGISTRY_CREDENTIAL_KEY` / `REGISTRY_CREDENTIALS_DIR` | 加密存储的密钥与**数据目录**（凭据、代理库、热度数据库） |
 
   新增配置项时要同步**五处**：`config.mjs`、`docker-compose.yml`、`.env.example`、
   README 的变量表、以及 `registry.config.example.json`。
@@ -224,6 +286,17 @@ Location / 上传会话各一套），用真实代码路径跑完整流程。**�
 要给它加一条断言**，并**确认回退修复后该断言会失败** —— 否则测试可能只是"跟着实现写"，
 挡不住回归。
 
+`scripts/verify-stats.mjs`（`pnpm verify:stats`）专门钉**热度口径**：blob 事件不计入、
+pull 的内容下载（GET）不计入、push 时的 blob 探测不计入、同一个 `event.id` 只计一次。
+**改动 `server/events.mjs` 的过滤判据时必须同时跑它**，并按上面的规矩确认回退后会失败
+（已验证：去掉 method 判据会有 6 项失败、去掉 mediaType 判据会有 5 项失败）。
+
+`scripts/verify-pull-history.mjs`（`pnpm verify:pull-history`）钉**拉取历史的存储契约**：
+**老库（user_version=1，只有热度）升级到 v2 不丢数据**、queued/running 不落库、
+失败任务保留阶段明细而成功任务不保留、两类保留期互不干扰。
+**改 `server/db.mjs` 的 schema 或 `puller.mjs` 的 `#settle` 时必须同时跑它**
+（已验证：去掉两处 `#settle` 调用会有 2 项失败）。
+
 `pnpm verify:real` 的价值在于：**mock 只能复现"你以为的"服务端行为**。
 本仓库真实吃过这个亏 —— mock 的 `/v2/` 挑战带了 scope（比真实宽松），
 于是"无 scope 令牌申请"的缺陷一直没被发现，直到打真实 registry 才暴露
@@ -240,6 +313,19 @@ curl -s -X POST localhost:8787/api/refresh   # 全量盘点
 **渲染结果无法靠读代码确认** —— 涉及布局/样式/交互时，要让人看截图或真实浏览器，
 不要臆断"应该没问题"。本仓库的 UI 问题基本都是在截图或实际点击里才暴露的
 （例如"任务行展开后收不回去"这种受控状态缺陷，读代码看不出，得点一下）。
+
+`scripts/verify-layout.mjs`（`pnpm verify:layout`）把上面这条变成了可执行的检查：
+用无头 Chrome 真的滚一遍，断言**滚动只发生在表格内部**、搜索框位置纹丝不动、表头粘住、
+分页器无需滚动即可见、日历的格子数/档位/尺寸合理，
+并把截图写到 `SHOT_DIR`（默认临时目录）。
+
+- 前置：另开终端跑 `pnpm dev`，然后 `pnpm verify:layout`。
+- **它刻意不进 `pnpm verify`**：需要开发态服务和本地 Chrome，无桌面环境跑不起来。
+  找不到 Chrome 时**跳过并返回 0**。
+- 访问地址要用 `localhost:5273`，**不要用 `127.0.0.1:5273`** ——
+  Vite 在 macOS 上只绑 IPv6 的 `[::1]`，`127.0.0.1` 会连接被拒。
+- 它第一次跑就抓到两个 type-check / build 都发现不了的问题：分页器被卷进表格滚动区、
+  30 天窗口的日历缩成 133px 细缝。**改布局后请跑一次。**
 
 **测试替身要和真实服务同形**：写 mock 前先确认真实响应长什么样
 （例如 `/v2/` 的挑战到底带不带 scope），否则 mock 会把缺陷掩盖过去。

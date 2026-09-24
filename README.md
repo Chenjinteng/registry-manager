@@ -14,9 +14,12 @@
 - **凭据管理**：外部源的 basic auth 凭据库，加密落盘，密码不回显。
 - **代理管理**：外部源的 HTTP 代理库，支持连通性测试。
 - **清单概览**：仓库数、tag 数、镜像层合计、清单刷新时间，以及读取失败的 tag 明细。
+- **镜像热度**：每个仓库 / tag 被 push、pull 了多少次，用来识别僵尸镜像与判断"能不能清理"。
+  ⚠️ 这一项**需要先在 registry 侧配置 webhook**（见[镜像热度](#镜像热度)），不配的话页面是空的。
 - **连接自检**：一键测试 registry 连通性与 API 版本。
 
-没有登录、没有数据库。清单在内存里缓存，重启即重新扫描。
+没有登录。**也没有需要运维的数据库服务**——清单在内存里缓存（重启即重新扫描），
+热度统计用 Node 自带的 SQLite，只落一个文件在数据目录里。
 
 版本变更见 [CHANGELOG.md](./CHANGELOG.md)；版本号规则见 [AGENTS.md](./AGENTS.md#版本号规则)。
 <img width="1855" height="927" alt="image" src="https://github.com/user-attachments/assets/512b97af-bb66-4ef6-9686-9eb05fe991ef" />
@@ -38,13 +41,21 @@ REGISTRY_URL=http://192.0.2.10:10001 pnpm dev
 pnpm dev
 ```
 
-开发态前端在 http://127.0.0.1:5273 （`/api` 自动代理到服务端）。
+开发态前端在 http://localhost:5273 （`/api` 自动代理到服务端）。
+
+> 请用 `localhost` 而不是 `127.0.0.1`：Vite 默认绑 `localhost`，在 macOS 上会解析成
+> **IPv6 的 `[::1]`**，此时 `http://127.0.0.1:5273` 是连不上的（连接被拒）。
+> `localhost` 两种解析都能用。
 生产态：
 
 ```bash
 pnpm build     # 产出 web/dist
 pnpm start     # 单进程同时提供页面与 /api，默认 http://127.0.0.1:8787
 ```
+
+> ⚠️ **镜像热度不是开箱即用的**，它需要 registry 侧配合（加一段 `notifications` 配置并用同一个
+> 密钥回调本服务，然后重启 registry）。不配的话热度页会给出配置片段，其余功能照常。
+> 详见[镜像热度](#镜像热度)。
 
 ### 验证
 
@@ -75,6 +86,13 @@ cp .env.example .env     # 填好 REGISTRY_URL
 docker compose up -d --build
 ```
 
+> ⚠️ **热度统计需要额外在 registry 侧配置，否则永远是空的。**
+> 它靠 registry 主动回调（Distribution 的 `notifications` webhook）拿数据 ——
+> 只在 `.env` 里设 `REGISTRY_NOTIFY_TOKEN` 是不够的，registry 那边也必须指向本服务、
+> 并用同一个密钥，**且改完要重启 registry 容器**（Distribution 没有配置热重载）。
+> 完整步骤见 [镜像热度 § 配置 registry 侧](#配置-registry-侧)。
+> **拉取、浏览、删除都不受这个影响**，不配也能用。
+
 `.env` 里的变量（`REGISTRY_URL` 必填，没填会直接报错而不是起一个连不上 registry 的容器）：
 
 | 变量 | 默认值 | 说明 |
@@ -87,11 +105,15 @@ docker compose up -d --build
 | `REGISTRY_CACHE_TTL_SECONDS` | `60` | 清单缓存时长 |
 | `REGISTRY_ALLOW_DELETE` | `true` | `false` = 只读模式，拒绝所有删除 |
 | `REGISTRY_ALLOW_PULL` | `true` | `false` = 禁止拉取模式，拒绝所有 `/api/pull/*` 写入 |
-| `REGISTRY_PULL_QUEUE_SIZE` | `50` | 内存里保留的最近任务数；超出按创建时间最旧剔除 |
+| `REGISTRY_PULL_QUEUE_SIZE` | `50` | 内存里保留的最近任务数（完整历史在 SQLite 里） |
+| `REGISTRY_PULL_HISTORY_RETENTION_DAYS` | `90` | 拉取历史的保留天数 |
+| `REGISTRY_NOTIFY_TOKEN` | 空 | 热度事件的共享密钥；**不设置则拒绝所有事件** |
+| `REGISTRY_ALLOW_REGISTRY_EVENTS` | `true` | `false` = 不再接收热度事件（历史仍可查） |
+| `REGISTRY_STATS_RETENTION_DAYS` | `90` | 热度数据的保留天数 |
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
-| `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 凭据文件目录 |
+| `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.3.1` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.4.0` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -102,7 +124,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.3.1 .
+docker build -t registry-manager:0.4.0 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -110,7 +132,7 @@ docker build -t registry-manager:0.3.1 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.3.1 .
+  -t registry-manager:0.4.0 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -121,7 +143,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.3.1 .
+  -t registry-manager:0.4.0 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -137,7 +159,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.3.1
+  registry-manager:0.4.0
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -163,8 +185,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.3.1 192.0.2.10:10001/example/registry-manager:0.3.1
-docker push 192.0.2.10:10001/example/registry-manager:0.3.1
+docker tag registry-manager:0.4.0 192.0.2.10:10001/example/registry-manager:0.4.0
+docker push 192.0.2.10:10001/example/registry-manager:0.4.0
 ```
 
 ### 镜像内置
@@ -195,9 +217,13 @@ docker push 192.0.2.10:10001/example/registry-manager:0.3.1
 | `cacheTtlSeconds` | `REGISTRY_CACHE_TTL_SECONDS` | `60` | 清单缓存时长 |
 | `allowDelete` | `REGISTRY_ALLOW_DELETE` | `true` | 设为 `false` 进入只读模式，服务端拒绝一切删除 |
 | `allowPull` | `REGISTRY_ALLOW_PULL` | `true` | 设为 `false` 后服务端拒绝一切 `/api/pull/*` 写入 |
-| `pullQueueSize` | `REGISTRY_PULL_QUEUE_SIZE` | `50` | 内存里保留的最近任务数；超出按创建时间最旧剔除 |
+| `pullQueueSize` | `REGISTRY_PULL_QUEUE_SIZE` | `50` | 内存里保留的最近任务数（完整历史在 SQLite 里，见下） |
+| `pullHistoryRetentionDays` | `REGISTRY_PULL_HISTORY_RETENTION_DAYS` | `90` | 拉取历史的保留天数（与热度**分开配置**） |
+| `notifyToken` | `REGISTRY_NOTIFY_TOKEN` | 空 | 热度事件的共享密钥。**只从环境变量读**；不设置则拒绝所有事件 |
+| `allowRegistryEvents` | `REGISTRY_ALLOW_REGISTRY_EVENTS` | `true` | 设为 `false` 后不再接收热度事件（历史仍可查询） |
+| `statsRetentionDays` | `REGISTRY_STATS_RETENTION_DAYS` | `90` | 热度数据的保留天数 |
 | `allowCredentials` | (env 决定) | - | 是否启用凭据库（由 `REGISTRY_CREDENTIAL_KEY` 是否设置决定） |
-| `credentialsDir` | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 凭据文件目录 |
+| `credentialsDir` | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与热度数据库都在这里 |
 | `port` | `PORT` | `8787` | 监听端口 |
 
 只有一个 registry：多实例配置属于平台能力，不属于这个工具。
@@ -231,6 +257,16 @@ docker push 192.0.2.10:10001/example/registry-manager:0.3.1
 | PATCH | `/api/proxies/:id` | 更新（密码传空字符串 = 清掉，改成匿名代理） |
 | DELETE | `/api/proxies/:id` | 删除代理 |
 | POST | `/api/proxies/:id/test` | 穿过该代理访问目标，返回状态码与耗时 |
+| POST | `/api/registry-events` | **registry 调用**：接收 push/pull 事件；需 `Authorization: Bearer <REGISTRY_NOTIFY_TOKEN>` |
+| GET | `/api/stats/summary?days=` | 热度总览（合计、拉取、推送、仓库数、最近事件时间） |
+| GET | `/api/stats/top?days=&limit=&by=repository\|tag` | 热度 Top 榜 |
+| GET | `/api/stats/series?days=&repository=` | 按天时间序列（`repository` 留空为全部） |
+| GET | `/api/stats/repositories?days=` | 全部有热度的仓库（返回 map，供列表页 join） |
+| GET | `/api/stats/events?limit=` | 最近收到的原始事件（含未被计入的原因），**排查用** |
+
+`/api/registry-events` 是唯一面向机器的写接口，因此和其它接口有两点不同：
+**失败返回真实的 HTTP 状态码**（401 / 503 / 400，registry 靠状态码决定重试与告警），
+且**先校验密钥再解析请求体**。
 
 ## 规模与边界
 
@@ -283,7 +319,9 @@ docker push 192.0.2.10:10001/example/registry-manager:0.3.1
 - 优雅取消：标记 `cancelled` 后立即让源 / 目的 stream 停止传输 —— 正在写的当前 chunk
   会写完才退出，目的端不会留下半截 manifest。已落库的 blob 不主动清理（沿用
   "删除不立即释放磁盘" 的约定），交给 `registry garbage-collect` 兜底。
-- 任务只存内存，重启即丢；这是刻意的 —— 与现有清单缓存一致，避免引入持久化依赖。
+- **运行态在内存、历史在 SQLite**：排队与执行中的任务（含实时进度）只在进程内，不需要数据库；
+  任务到达终态时追写一条历史到 `data/registry-manager.db`，**所以重启之后仍然查得到**
+  "上周搬了哪些镜像"。历史默认保留 90 天（`REGISTRY_PULL_HISTORY_RETENTION_DAYS`）。
 
 ### 上传会话的 Location 可能指向别的主机
 
@@ -512,6 +550,75 @@ sudo chown -R 1000:1000 ./data
 ```bash
 -e REGISTRY_CREDENTIALS_DIR=/tmp/registry-manager-data
 ```
+
+## 镜像热度
+
+统计每个仓库（以及每个 tag）被 **push / pull** 了多少次，用来回答"哪些镜像真有人在用、
+哪些是拉了就没动过的僵尸镜像"——这是判断"能不能清理"的关键输入。
+
+原理是 Distribution 原生的 webhook 通知：registry 在 manifest 的 push / pull 时主动回调本服务。
+**管理服务只收事件，不进数据面**：`docker pull` 的字节一个包都不经过它。
+
+> **这一节是热度能用的前提。** 热度不像拉取、浏览、删除那样开箱即用 ——
+> 数据是 registry **主动推**过来的，所以只在本服务上设置密钥没有任何作用，
+> 必须在 registry 的 `config.yml` 里加一段 `notifications` 并用同一个密钥，
+> 然后**重启 registry 容器**。没配好的话热度页会给出可复制的配置片段，其余功能不受影响。
+
+### 配置 registry 侧
+
+在 registry 的 `config.yml` 里**顶级**加一段（与 `log` / `storage` / `http` / `health` 同级）：
+
+```yaml
+notifications:
+  endpoints:
+    - name: registry-manager
+      url: http://registry-manager:8787/api/registry-events
+      headers:
+        Authorization: [Bearer <与 REGISTRY_NOTIFY_TOKEN 相同的密钥>]
+      timeout: 2s
+      threshold: 5
+      backoff: 1s
+```
+
+然后：
+
+1. 在服务端设置 `REGISTRY_NOTIFY_TOKEN`（两边必须一致，用 `openssl rand -hex 32` 生成）
+2. **重启 registry 容器** —— Distribution 只监听 `SIGTERM`，没有配置热重载
+3. 重启后确认 registry 日志里有 `configuring endpoint registry-manager`，这是配置生效的证据
+4. 随便 `docker pull` 一个镜像，热度页应立刻出现计数
+
+`url` 里的主机名要在 registry 容器内可解析（同一个 compose 网络直接用服务名即可）。
+
+### 怎么算"一次拉取"
+
+一次 `docker pull` 会产生十几条事件（每个层一条 blob），所以口径必须过滤：
+
+| 事件 | 是否计入 | 原因 |
+| --- | --- | --- |
+| manifest 的 `HEAD`（按 tag） | ✅ | 带 tag，代表用户意图 |
+| manifest 的 `PUT`（push 落库） | ✅ | 带 tag |
+| manifest 的 `GET`（按 digest 取内容） | ❌ | 与上面那条 HEAD 是同一个 manifest，计入会翻倍 |
+| 所有 blob 事件 | ❌ | 否则一次 15 层的拉取会被算成 15 次 |
+
+结果是**一次拉取 = 1 次热度，与镜像层数无关**。
+
+顺带一提：`docker push` 在探测 blob 是否存在时会发出 `action: "pull"` 的事件，
+所以"pull 事件"并不等于"有人在拉镜像"——上面的过滤顺带把这种情况也排除了。
+
+### 已知边界
+
+- 热度**从配置生效那天开始**统计，之前的历史补不回来。
+- 失败的拉取（401 / 404）不产生事件，所以热度只反映**成功**的推送与拉取。
+- **不统计客户端 IP**：容器端口映射后 registry 看到的是 Docker 网桥地址，不是真实客户端。
+- 保留期默认 90 天（`REGISTRY_STATS_RETENTION_DAYS`），按天聚合。
+- 热度页底部有「最近事件」面板：事件到了但没被计入时，能直接看出原因。
+
+### 与 Prometheus 指标的关系
+
+Distribution 的 `registry_http_requests_total` **没有仓库维度标签**（实测只有
+`handler` / `method` / `code`，其中 `handler` 是路由名如 `manifest` / `blob`），
+所以按镜像的热度不可能来自指标。指标仍然有用：它是个全局计数，
+可以拿来和事件数**对账**，判断 webhook 是否在丢事件。
 
 ## 许可证
 

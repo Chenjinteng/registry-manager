@@ -136,6 +136,69 @@
   min-width: 0;
 }
 
+/*
+ * 让页面撑满可视区，**只让表格区域内部滚动**。
+ *
+ * 不这么做的话整页一起滚：往下翻表格会把搜索框、时间窗、KPI 一起顶走，
+ * 而"翻到第 30 行"和"改一下搜索词"本来就是交替发生的动作，
+ * 每次都要先滚回顶部很烦人。
+ *
+ * 高度链是现成的（.app-shell 100vh → .app-main flex:1/min-height:0 → .app-content flex:1），
+ * 所以这里只要把 .page 撑满、再把 overflow 从 .app-content 转移到表格容器上。
+ *
+ * 只给"一个表格吃掉剩余空间"的页面用；下方还有别的区块时用 .table-scroll--bounded。
+ */
+.page--fill {
+  height: 100%;
+  min-height: 0;
+  /* 用 auto 而不是 hidden：视口过矮放不下页头+KPI+表格下限时，
+     至少整页还能滚，而不是把内容直接裁掉看不见。 */
+  overflow: auto;
+}
+
+/* 放表格的那张卡负责吃掉剩余高度，并把自己变成纵向 flex 容器。 */
+.page--fill > .panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 表格滚动容器。表头靠 AntD 的 sticky（getContainer 指到这里）固定。 */
+.table-scroll {
+  overflow: auto;
+}
+
+.page--fill .table-scroll {
+  flex: 1 1 auto;
+  /* 留一个下限，别在窄矮窗口里被压成一条缝。 */
+  min-height: 240px;
+}
+
+/*
+ * 页面下方还有别的区块时用它：给表格一个上限，避免它无限变高
+ * 把下面的内容顶到很远的地方。表格内部照常滚动、表头照常粘住。
+ */
+.table-scroll--bounded {
+  max-height: 460px;
+}
+
+/*
+ * 分页器粘在滚动区底部。
+ *
+ * 表格改成内部滚动之后，AntD 的分页器（它在 .ant-table 内部）会跟着内容一起滚 ——
+ * 74 个仓库时得先滚到底才能翻页，比原来更难用。粘住它，翻页入口就一直在。
+ */
+.table-scroll .ant-table-pagination {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin: 8px 0 0 !important;
+  padding: 10px 8px;
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-border-2);
+}
+
 .page-header {
   display: flex;
   align-items: flex-start;
@@ -153,7 +216,17 @@
 
 .page-subtitle {
   margin: 4px 0 0;
-  max-width: 720px;
+  /*
+   * 880 而不是 720：实测「镜像拉取」那句需要 825px 才能一行放下，
+   * 卡在 720 会折成两行且末行只剩 3~9 个字（孤行），很难看。
+   * 其余页面的副标题现在都是一句话，远达不到这个宽度，不受影响。
+   */
+  max-width: 880px;
+  /*
+   * 窄屏终究要换行时，避免末行只剩两三个字。
+   * 不支持的浏览器会忽略它，退化成普通换行（即当前行为），不会变差。
+   */
+  text-wrap: pretty;
   /* 与 PageHeaderShell 的 subtitleClassName 一致：text-sm */
   font-size: 14px;
   color: var(--color-text-3);
@@ -272,6 +345,12 @@
   margin-bottom: 12px;
 }
 
+/* 历史任务展开后没有阶段明细时的说明：不是坏了，是这次没保留。 */
+.pull-phase-empty {
+  color: var(--color-text-3);
+  font-size: 13px;
+}
+
 .pull-phase-list {
   display: flex;
   flex-direction: column;
@@ -283,4 +362,128 @@
   align-items: center;
   gap: 8px;
   padding: 4px 0;
+}
+
+/* ── 镜像热度 ── */
+
+/*
+ * 按天趋势：GitHub 贡献日历式的方格图。
+ *
+ * 列数由日期跨度算出来、格宽由列数决定（见 contribution-heatmap.tsx），
+ * 所以这里只管颜色与排版。**方格必须是正方形**，因此 SVG 用固定像素尺寸 +
+ * max-width（窄屏只缩不放），不做 width:100% 拉伸。
+ *
+ * 强度四档用同一个语义色叠加 fill-opacity 实现，不写死任何色值 ——
+ * 换成浅色主题时同样成立。
+ */
+.heatmap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.heatmap-caption {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--color-text-2);
+}
+
+.heatmap-hint {
+  color: var(--color-text-3);
+}
+
+.heatmap-grid {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.heatmap-axis {
+  fill: var(--color-text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 第 0 档 = 当天没有事件。用一个中性的填充色（而不是描边），
+   这样空格子也有实体感，整张日历才是连续的。 */
+.heatmap-cell {
+  fill: var(--color-fill-2);
+}
+
+.heatmap-cell--l1 {
+  fill: var(--color-primary);
+  fill-opacity: 0.3;
+}
+
+.heatmap-cell--l2 {
+  fill: var(--color-primary);
+  fill-opacity: 0.52;
+}
+
+.heatmap-cell--l3 {
+  fill: var(--color-primary);
+  fill-opacity: 0.76;
+}
+
+.heatmap-cell--l4 {
+  fill: var(--color-primary);
+  fill-opacity: 1;
+}
+
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+
+.heatmap-swatch {
+  display: inline-block;
+  border-radius: 2px;
+}
+
+.stats-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.stats-panel-title {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-1);
+}
+
+/* 折叠块里的标题不再需要底部留白，由外层给的间距承担。 */
+.stats-panel-head .stats-panel-title {
+  margin-bottom: 0;
+}
+
+.stats-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+/* registry 侧配置片段：等宽 + 浅底，可复制。 */
+.stats-code {
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  background: var(--color-fill-1);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-2);
+  white-space: pre;
 }

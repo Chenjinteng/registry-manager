@@ -8,6 +8,9 @@
   "allowDelete": true,
   "allowPull": true,
   "pullQueueSize": 50,
+  "pullHistoryRetentionDays": 90,
+  "allowRegistryEvents": true,
+  "statsRetentionDays": 90,
   "credentialsDir": "/app/data",
   "port": 8787
 }
