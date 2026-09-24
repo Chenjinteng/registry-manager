@@ -73,6 +73,16 @@
   max-width: 340px;
 }
 
+/* 主题切换：图标按钮，颜色跟随顶栏的次级文字，不要 AntD 默认的实心色。 */
+.app-theme-toggle {
+  flex: none;
+  color: var(--color-text-3);
+}
+
+.app-theme-toggle:hover {
+  color: var(--color-text-1);
+}
+
 /* main：flex-1 + p-4 + 顶部一道很淡的内阴影。 */
 .app-main {
   display: flex;
@@ -81,7 +91,7 @@
   min-height: 0;
   min-width: 0;
   padding: 16px;
-  box-shadow: inset 0 6px 10px -6px rgba(0, 0, 0, 0.03);
+  box-shadow: inset 0 6px 10px -6px var(--shadow-inset);
 }
 
 /* 顶部横向导航条：对应 sub-layout 的 .segmentedNav */

@@ -367,6 +367,182 @@ try {
     skip('热度页布局', '热度页没渲染出来（可能未启用热度统计）');
   }
 
+  /*
+   * ───────────────────── 深色主题 ─────────────────────
+   *
+   * 深色主题的典型翻车方式读代码看不出来：自定义 CSS 用的 `--color-*` 变深了，
+   * 而 AntD 的表格 / 分页器 / 下拉还是浅色 —— 同一屏里两套配色（"半深色"）。
+   * 静态检查（scripts/verify-theme.mjs）只能证明两套 token 一一对应，
+   * 证明不了**浏览器算出来的最终颜色**是对的，所以这里真点一下按钮、真读一遍 computed style。
+   */
+  console.log('\n──── 深色主题 ────');
+
+  /** 同时取多个"面"的背景色：AntD 的面和自绘的面都要看。 */
+  const SURFACES = [
+    'body',
+    '.app-header',
+    '.panel',
+    '.ant-table',
+    '.ant-table-thead th',
+    '.ant-pagination',
+    '.ant-segmented',
+    '.ant-tag',
+  ];
+  const themeSnapshot = () =>
+    evaluate(`(() => {
+      const surfaces = {};
+      for (const sel of ${JSON.stringify(SURFACES)}) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const cs = getComputedStyle(el);
+        surfaces[sel] = cs.backgroundColor;
+      }
+      return {
+        theme: document.documentElement.dataset.theme ?? null,
+        stored: localStorage.getItem('registry-manager-theme'),
+        colorScheme: getComputedStyle(document.documentElement).colorScheme,
+        bodyBg: getComputedStyle(document.body).backgroundColor,
+        bodyColor: getComputedStyle(document.body).color,
+        surfaces,
+        hasToggle: !!document.querySelector('.app-theme-toggle'),
+      };
+    })()`);
+
+  /** 相对亮度 0~1；只看 rgb，忽略 alpha（调用方自己处理透明）。 */
+  const luminance = (css) => {
+    const nums = (css.match(/[\d.]+/g) || []).map(Number);
+    const [r, g, b] = nums;
+    if (r === undefined) return null;
+    if (nums.length === 4 && nums[3] === 0) return null; // 完全透明：这个面没有自己的底色
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  };
+  const opaqueDark = (css) => {
+    const l = luminance(css);
+    return l === null ? null : l < 0.35;
+  };
+
+  const lightSnap = await themeSnapshot();
+  console.log('   浅色:', JSON.stringify(lightSnap.surfaces));
+  check('顶栏有主题切换按钮', lightSnap.hasToggle === true);
+  /*
+   * 存在 ≠ 看得见。顶栏是右对齐的 flex，meta 区一旦被 URL 撑满，
+   * 按钮会被挤出视口 —— DOM 查询照样能查到，但用户点不到。
+   */
+  const toggleBox = await evaluate(`(() => {
+    const el = document.querySelector('.app-theme-toggle');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      w: Math.round(r.width), h: Math.round(r.height),
+      left: Math.round(r.left), right: Math.round(r.right), vw: window.innerWidth,
+    };
+  })()`);
+  check(
+    '切换按钮真的可见（没被 URL 挤出顶栏）',
+    Boolean(toggleBox) &&
+      toggleBox.w > 0 &&
+      toggleBox.h > 0 &&
+      toggleBox.left >= 0 &&
+      toggleBox.right <= toggleBox.vw,
+    JSON.stringify(toggleBox)
+  );
+  check('初始是浅色（未设置过选择时）', lightSnap.theme === 'light', String(lightSnap.theme));
+  check('浅色下 color-scheme 是 light（原生滚动条跟随）', lightSnap.colorScheme.includes('light'));
+
+  await evaluate('document.querySelector(".app-theme-toggle").click()');
+  await sleep(700);
+  const darkSnap = await themeSnapshot();
+  console.log('   深色:', JSON.stringify(darkSnap.surfaces));
+
+  check('点一下按钮就切到深色', darkSnap.theme === 'dark', String(darkSnap.theme));
+  check('选择被记进 localStorage', darkSnap.stored === 'dark', String(darkSnap.stored));
+  check('深色下 color-scheme 是 dark', darkSnap.colorScheme.includes('dark'));
+  check(
+    'body 背景真的变暗了',
+    (luminance(darkSnap.bodyBg) ?? 1) < 0.25 && (luminance(lightSnap.bodyBg) ?? 0) > 0.25,
+    `${lightSnap.bodyBg} → ${darkSnap.bodyBg}`
+  );
+  check(
+    '文字色跟着变亮（深底上必须是浅字）',
+    (luminance(darkSnap.bodyColor) ?? 0) > 0.5,
+    darkSnap.bodyColor
+  );
+
+  /*
+   * 这一条是本节的重点：**每一个面**都得是深色。
+   * 只要 AntD 的某一层没跟上（例如分页器、表头），这里就会抓到。
+   */
+  const lightSurfacesInDark = Object.entries(darkSnap.surfaces).filter(([, bg]) => opaqueDark(bg) === false);
+  check(
+    '自定义 CSS 与 AntD 一起变深，没有"半深色"的面',
+    lightSurfacesInDark.length === 0,
+    lightSurfacesInDark.length ? lightSurfacesInDark.map(([s, bg]) => `${s}=${bg}`).join(', ') : `${Object.keys(darkSnap.surfaces).length} 个面全部为深色`
+  );
+  const darkCount = Object.values(darkSnap.surfaces).filter((bg) => opaqueDark(bg) === true).length;
+  check('确实取到了足够多的面（不是选择器全落空）', darkCount >= 5, `${darkCount} 个深色面`);
+
+  console.log('   截图:', await shot('layout-dark-stats'));
+
+  // 镜像列表页也看一眼：表格 + 分页器是 AntD 面最多的一页。
+  await evaluate(
+    `[...document.querySelectorAll('.ant-segmented-item')].find((el) => el.textContent.includes('镜像列表'))?.click()`
+  );
+  await sleep(1200);
+  const darkList = await themeSnapshot();
+  check(
+    '镜像列表页同样没有浅色残留',
+    Object.entries(darkList.surfaces).every(([, bg]) => opaqueDark(bg) !== false),
+    Object.entries(darkList.surfaces).filter(([, bg]) => opaqueDark(bg) === false).map(([s, bg]) => `${s}=${bg}`).join(', ')
+  );
+  console.log('   截图:', await shot('layout-dark-images'));
+
+  /*
+   * 刷新后不闪白：`data-theme` 必须在 React 渲染出任何 DOM **之前**就设好。
+   * 用首屏注入的 MutationObserver 抓住第一次设置属性时的现场：
+   * 那时 `#root` 还不存在（-1）或还是空的（0），就说明主题先于 React 生效。
+   * 若主题交给 React 的 useEffect 去设，这里会看到 rootChildren > 0 —— 那一帧就是白屏。
+   */
+  await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `
+      window.__themeTrace = [];
+      /*
+       * 观察 document 而不是 documentElement：document-start 阶段 <html> 可能还没建出来，
+       * 观察 null 会直接抛错，于是"一个记录都没有" —— 那看起来和"没闪"一模一样。
+       */
+      new MutationObserver(() => {
+        window.__themeTrace.push({
+          theme: document.documentElement.dataset.theme ?? null,
+          rootChildren: document.getElementById('root')?.childElementCount ?? -1,
+        });
+      }).observe(document, { attributes: true, attributeFilter: ['data-theme'], subtree: true });
+    `,
+  });
+  await send('Page.navigate', { url: APP });
+  await waitFor('!!document.querySelector(".app-header")', '刷新后重新挂载', 12000);
+  await sleep(500);
+  const trace = await evaluate('window.__themeTrace ?? []');
+  const reloaded = await themeSnapshot();
+  check('刷新后仍是深色（选择被记住）', reloaded.theme === 'dark', String(reloaded.theme));
+  check(
+    '刷新首帧就是深色，且早于 React 渲染（否则深色用户会看到一瞬白屏）',
+    trace.length > 0 && trace[0].theme === 'dark' && trace[0].rootChildren <= 0,
+    JSON.stringify(trace[0] ?? null)
+  );
+
+  // 切回浅色：round-trip 要能回来，否则等于"只能进不能出"。
+  await evaluate('document.querySelector(".app-theme-toggle").click()');
+  await sleep(700);
+  const backSnap = await themeSnapshot();
+  check('再点一下能切回浅色', backSnap.theme === 'light', String(backSnap.theme));
+  check('切回后 localStorage 也更新了', backSnap.stored === 'light', String(backSnap.stored));
+  check(
+    '切回浅色后没有深色残留',
+    Object.entries(backSnap.surfaces).every(([, bg]) => {
+      const l = luminance(bg);
+      return l === null || l > 0.6;
+    }),
+    Object.entries(backSnap.surfaces).filter(([, bg]) => luminance(bg) !== null && luminance(bg) <= 0.6).map(([s, bg]) => `${s}=${bg}`).join(', ')
+  );
 } finally {
   ws.close();
   cleanup();

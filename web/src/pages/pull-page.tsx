@@ -1270,7 +1270,7 @@ function JobPhases({ job }: { job: PullJob }) {
             <span
               style={{
                 fontSize: 12,
-                color: phase.status === 'failed' ? 'var(--color-error)' : 'var(--color-text-3)',
+                color: phase.status === 'failed' ? 'var(--color-fail)' : 'var(--color-text-3)',
               }}
             >
               {phase.message}
@@ -1281,7 +1281,7 @@ function JobPhases({ job }: { job: PullJob }) {
       {job.errorMessage ? (
         <div
           className="pull-phase-row"
-          style={{ color: 'var(--color-error)', background: 'var(--color-error-bg)' }}
+          style={{ color: 'var(--color-fail)', background: 'var(--color-fail-bg)' }}
         >
           <Tag color="error">失败</Tag>
           <span style={{ fontSize: 12 }}>

@@ -1,12 +1,14 @@
 import { useState, type ReactNode } from 'react';
-import { App as AntdApp, Segmented, Tag, Tooltip } from 'antd';
+import { App as AntdApp, Button, Segmented, Tag, Tooltip } from 'antd';
 import {
   ApiOutlined,
   BarChartOutlined,
   CloudDownloadOutlined,
   DockerOutlined,
   KeyOutlined,
+  MoonOutlined,
   SettingOutlined,
+  SunOutlined,
 } from '@ant-design/icons';
 
 import ImagesPage from './pages/images-page';
@@ -18,6 +20,9 @@ import StatsPage from './pages/stats-page';
 import type { AppConfig, Inventory } from './types';
 
 type PageKey = 'images' | 'stats' | 'pull' | 'credentials' | 'proxies' | 'settings';
+
+/** 界面主题。持久化与首屏应用都在 main.tsx / index.html 里，这里只负责展示与切换。 */
+export type ThemeMode = 'light' | 'dark';
 
 /**
  * 整体布局：
@@ -33,7 +38,13 @@ const NAV_ITEMS: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'settings', label: '设置', icon: <SettingOutlined /> },
 ];
 
-export default function App() {
+export default function App({
+  mode,
+  onToggleMode,
+}: {
+  mode: ThemeMode;
+  onToggleMode: () => void;
+}) {
   // 两个页面共享同一份清单：切换页面不该重新抓取 registry。
   const [page, setPage] = useState<PageKey>('images');
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -70,6 +81,17 @@ export default function App() {
             <span className="ellipsis mono" title={config?.url}>
               {config ? config.url : '加载中…'}
             </span>
+            {/* 图标显示的是"点了会变成什么"，所以深色下显示太阳。 */}
+            <Tooltip title={mode === 'dark' ? '切换到浅色主题' : '切换到深色主题'}>
+              <Button
+                type="text"
+                size="small"
+                className="app-theme-toggle"
+                aria-label={mode === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
+                icon={mode === 'dark' ? <SunOutlined /> : <MoonOutlined />}
+                onClick={onToggleMode}
+              />
+            </Tooltip>
           </div>
         </header>
 

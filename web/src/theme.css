@@ -1,10 +1,16 @@
 /*
- * 语义化设计 token（light 主题）。
+ * 语义化设计 token。
  *
- * 所有颜色都以语义命名（primary / text-N / bg-N / border-N / fill-N / error ...），
+ * 所有颜色都以语义命名（primary / text-N / bg-N / border-N / fill-N / fail ...），
  * 组件里只允许引用 var(--color-*)，不要写死色值 —— 这样换主题只需要改这个文件。
+ *
+ * **深浅两套必须一一对应**：`[data-theme='dark']` 要覆盖 `:root` 里的每一个 token。
+ * 漏掉的那个会继续用浅色值，表现为"某个角落突然是白的"，而且不会有任何报错。
  */
 :root {
+  /* 让原生滚动条、表单控件跟随主题，否则深色页面上会插着一根亮滚动条。 */
+  color-scheme: light;
+
   --color-primary: #155aef;
   --color-primary-foreground: #ffffff;
   --color-primary-bg-active: #e1edfc;
@@ -34,6 +40,8 @@
   --color-warning: #faad14;
   --color-info: #1677ff;
   --color-fail: #f43b2c;
+  /* 失败态的浅色底块（错误详情之类）。 */
+  --color-fail-bg: #f43b2c14;
 
   --color-background-body: #f2f4f7;
   --color-side-nav-text: #475468;
@@ -44,6 +52,65 @@
 
   --radius-sm: 6px;
   --radius-md: 8px;
+
+  /*
+   * 顶栏下方那道极淡的内阴影。做成 token 是因为深色下要换：黑色阴影压在深色底上
+   * 等于没有，得加深才保得住那点层次。
+   */
+  --shadow-inset: rgba(0, 0, 0, 0.03);
+}
+
+/*
+ * 深色主题。切换方式是 `<html data-theme="dark">` ——
+ * 首屏由 web/index.html 里的内联脚本在 React 挂载前就打上，避免"先白后黑"的闪烁。
+ *
+ * 配色原则：**不要简单地把浅色值取反**。深色底上的对比度感受完全不同，
+ * 所以主色被提亮、文字改用低饱和的冷灰、边框靠"比背景亮一点"来分层，
+ * 而不是靠深色描边。
+ */
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* 原来的 #155aef 压在深色底上会发闷，提亮后链接与选中态才看得清。 */
+  --color-primary: #4c8dff;
+  --color-primary-foreground: #0b1220;
+  --color-primary-bg-active: #4c8dff26;
+  --color-secondary: #1f2430;
+
+  --color-text-1: #e6eaf2;
+  --color-text-2: #aab6c8;
+  --color-text-3: #7d8ba1;
+  --color-text-4: #5b6678;
+
+  --color-bg: #171b24;
+  --color-bg-hover: #1f2530;
+  --color-bg-1: #171b24;
+  --color-bg-4: #1b202a;
+
+  --color-border: #2a313d;
+  --color-border-1: #262d38;
+  --color-border-2: #2f3745;
+  --color-border-3: #3a4353;
+
+  --color-fill-1: #1c222c;
+  --color-fill-2: #1f2530;
+  --color-fill-3: #252c38;
+  --color-fill-4: #2b3341;
+
+  --color-success: #3ddc84;
+  --color-warning: #ffc53d;
+  --color-info: #4096ff;
+  --color-fail: #ff6b5e;
+  --color-fail-bg: #ff6b5e1f;
+
+  --color-background-body: #0f131a;
+  --color-side-nav-text: #aab6c8;
+  --color-side-nav-text-active: #4c8dff;
+  --color-side-nav-bg: #171b24;
+  --color-side-nav-hover-bg: #1f2530;
+  --color-side-nav-active-bg: #4c8dff1f;
+
+  --shadow-inset: rgba(0, 0, 0, 0.4);
 }
 
 * {

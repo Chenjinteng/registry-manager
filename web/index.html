@@ -4,6 +4,29 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>镜像仓库管理</title>
+    <script>
+      /*
+       * 在 React 挂载之前就把主题定下来。
+       *
+       * 为什么必须内联：主题是 `document.documentElement.dataset.theme` 上的一个属性，
+       * 如果等 React 起来再设，首帧会先按浅色渲染一次 —— 深色用户会看到一瞬白屏闪烁。
+       * 这段脚本必须同步执行、且位于样式之前。
+       *
+       * 取值顺序：上次的选择 > 系统偏好。读不到就按浅色（不报错、不阻塞）。
+       * React 侧不重复这套逻辑，而是直接读这里已经设好的属性（见 main.tsx）。
+       */
+      (function () {
+        try {
+          var saved = localStorage.getItem('registry-manager-theme');
+          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var mode = saved === 'dark' || saved === 'light' ? saved : prefersDark ? 'dark' : 'light';
+          document.documentElement.dataset.theme = mode;
+        } catch (error) {
+          // 隐私模式 / 禁用存储时 localStorage 会抛错：主题退回浅色即可，不该因此白屏。
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

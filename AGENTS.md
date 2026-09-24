@@ -227,6 +227,21 @@ node server/index.mjs
 - 结构：`header`（sticky 顶栏）→ `main` → **顶部横向 `Segmented` 导航** → 内容区。
   应用内导航在**顶部**，不要改成左侧栏。
 - 颜色一律用 `web/src/theme.css` 里的语义 token（`var(--color-*)`），不要写死色值。
+- **深浅两套主题**：切换开关写在 `<html data-theme="dark">` 上，
+  `theme.css` 的 `:root`（浅）与 `[data-theme='dark']`（深）**必须一一对应**
+  （与主题无关的几何 token 明确豁免，见脚本里的 `THEME_INDEPENDENT`）。
+  - 加 token 时**两套都要加**：漏掉的那个继续用浅色值，表现为"某个角落突然是白的"，
+    不报错、不抛异常、type-check 也过。`pnpm verify:theme` 会挡住。
+  - **不要写 `var(--x)` 之前先确认它存在。** CSS 自定义属性没有值域检查，
+    名字写错整条声明被静默丢弃 —— 本仓库真实发生过（`--color-error` 从未存在过，
+    失败态高亮一直是失效的）。`pnpm verify:theme` 会扫描所有 `var(--…)` 引用。
+  - 深色下 **AntD 必须一起变**：`main.tsx` 用 `darkAlgorithm` 打底，
+    并把 AntD token **对齐到 `theme.css` 的深色值**。只改自己那套会得到"半深色"
+    （自定义 CSS 深了、AntD 表格还是白的），这是深色主题最常见的翻车方式。
+  - 首屏防闪白的内联脚本在 `web/index.html`，它必须**同步执行、早于模块脚本**；
+    React 侧**只读** `dataset.theme`，**不要**再判断一次 `prefers-color-scheme`
+    —— 两处判断就是两个真相来源。
+  - 两套都要设 `color-scheme`，否则原生滚动条与表单控件不跟随主题。
 - KPI 卡：图标块 28×28（语义色底）+ 13px 标签 + 粗体数值，样式见 `app.css` 的 `.metric-card`。
 - 手写 SVG 图表的约定：
   - **几何与分档逻辑抽到 `web/src/*.ts`，不要在组件里算**。渲染结果没法靠读代码确认，
@@ -297,6 +312,13 @@ pull 的内容下载（GET）不计入、push 时的 blob 探测不计入、同�
 **改 `server/db.mjs` 的 schema 或 `puller.mjs` 的 `#settle` 时必须同时跑它**
 （已验证：去掉两处 `#settle` 调用会有 2 项失败）。
 
+`scripts/verify-theme.mjs`（`pnpm verify:theme`）钉**深浅主题的对应关系**，四类都是
+"不报错但长得不对"的缺陷：`:root` 的 token 有没有在深色块里漏覆盖、代码里引用的
+`var(--…)` 是否真的存在（`--color-error` 那次事故）、`main.tsx` 的 AntD token 与
+`theme.css` 的语义色是否同一组值、首屏内联脚本是否仍在模块脚本之前。
+**改 `theme.css` / `main.tsx` / `index.html` 的任一处都要跑它**（已验证：逐个回退这四类
+改动，断言都会失败）。
+
 `pnpm verify:real` 的价值在于：**mock 只能复现"你以为的"服务端行为**。
 本仓库真实吃过这个亏 —— mock 的 `/v2/` 挑战带了 scope（比真实宽松），
 于是"无 scope 令牌申请"的缺陷一直没被发现，直到打真实 registry 才暴露
@@ -316,7 +338,7 @@ curl -s -X POST localhost:8787/api/refresh   # 全量盘点
 
 `scripts/verify-layout.mjs`（`pnpm verify:layout`）把上面这条变成了可执行的检查：
 用无头 Chrome 真的滚一遍，断言**滚动只发生在表格内部**、搜索框位置纹丝不动、表头粘住、
-分页器无需滚动即可见、日历的格子数/档位/尺寸合理，
+分页器无需滚动即可见、日历的格子数/档位/尺寸合理、**深色主题下没有"半深色"的面**，
 并把截图写到 `SHOT_DIR`（默认临时目录）。
 
 - 前置：另开终端跑 `pnpm dev`，然后 `pnpm verify:layout`。
@@ -326,6 +348,11 @@ curl -s -X POST localhost:8787/api/refresh   # 全量盘点
   Vite 在 macOS 上只绑 IPv6 的 `[::1]`，`127.0.0.1` 会连接被拒。
 - 它第一次跑就抓到两个 type-check / build 都发现不了的问题：分页器被卷进表格滚动区、
   30 天窗口的日历缩成 133px 细缝。**改布局后请跑一次。**
+- 深色主题那一段是**真点按钮、真读 computed style**：只断言 `data-theme` 变了是不够的
+  —— 自查发现"半深色"只有读 `.ant-table` / `.ant-pagination` / `.ant-tag` 这些
+  AntD 面的最终背景色才看得出来。刷新那一步用首屏注入的 `MutationObserver` 记下
+  `data-theme` 第一次被设置时 `#root` 是否已有子节点，**那才是"闪不闪白"的判据**
+  （把主题交给 React 的 `useEffect` 去设 → `rootChildren > 0` → 断言失败）。
 
 **测试替身要和真实服务同形**：写 mock 前先确认真实响应长什么样
 （例如 `/v2/` 的挑战到底带不带 scope），否则 mock 会把缺陷掩盖过去。

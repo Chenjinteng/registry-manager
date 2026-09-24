@@ -1,7 +1,7 @@
 {
   "name": "registry-manager",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "独立的 CNCF Distribution 镜像仓库管理 Web",
   "type": "module",
   "packageManager": "pnpm@11.20.0",
@@ -23,7 +23,7 @@
     "build": "vite build",
     "start": "node --disable-warning=ExperimentalWarning server/index.mjs",
     "type-check": "tsc --noEmit",
-    "verify": "node scripts/verify-auth.mjs && node scripts/verify-token-auth.mjs && node scripts/verify-upload-location.mjs && node --experimental-strip-types --no-warnings scripts/verify-job-expansion.mjs && node --experimental-strip-types --no-warnings scripts/verify-heatmap.mjs && node scripts/verify-pull.mjs && node --disable-warning=ExperimentalWarning scripts/verify-stats.mjs && node --disable-warning=ExperimentalWarning scripts/verify-pull-history.mjs",
+    "verify": "node scripts/verify-auth.mjs && node scripts/verify-token-auth.mjs && node scripts/verify-upload-location.mjs && node --experimental-strip-types --no-warnings scripts/verify-job-expansion.mjs && node --experimental-strip-types --no-warnings scripts/verify-heatmap.mjs && node scripts/verify-pull.mjs && node --disable-warning=ExperimentalWarning scripts/verify-stats.mjs && node --disable-warning=ExperimentalWarning scripts/verify-pull-history.mjs && node scripts/verify-theme.mjs",
     "verify:auth": "node scripts/verify-auth.mjs",
     "verify:token": "node scripts/verify-token-auth.mjs",
     "verify:location": "node scripts/verify-upload-location.mjs",
@@ -33,6 +33,7 @@
     "verify:pull": "node scripts/verify-pull.mjs",
     "verify:stats": "node --disable-warning=ExperimentalWarning scripts/verify-stats.mjs",
     "verify:pull-history": "node --disable-warning=ExperimentalWarning scripts/verify-pull-history.mjs",
+    "verify:theme": "node scripts/verify-theme.mjs",
     "verify:real": "node scripts/verify-real-registries.mjs"
   },
   "dependencies": {
