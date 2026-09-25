@@ -116,7 +116,7 @@ docker compose up -d --build
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.9.6` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.9.7` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -127,7 +127,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.9.6 .
+docker build -t registry-manager:0.9.7 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -135,7 +135,7 @@ docker build -t registry-manager:0.9.6 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.9.6 .
+  -t registry-manager:0.9.7 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -146,7 +146,7 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.9.6 .
+  -t registry-manager:0.9.7 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
@@ -158,7 +158,7 @@ Linux 上用宿主机在 docker0 上的地址（或用 `--network=host`），mac
 ```bash
 docker build \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
-  -t registry-manager:0.9.6 .
+  -t registry-manager:0.9.7 .
 ```
 
 不传这个参数就仍是默认的 `registry.npmjs.org`，行为与以前完全一样。
@@ -172,14 +172,22 @@ macOS 上这些包装到的是 `darwin` 变体，Linux 容器里必须重新下�
 不读 `.npmrc`）和 `pnpm`（装依赖）。少管一个就会出现"设了也没用"——
 尤其是**构建卡在第一步、连 pnpm 都没装好**，那种情况就是漏了 corepack。
 
-**构建看起来"卡住不动"时**，先加 `--progress=plain` 再看：
+**构建输出太少、看不出卡在哪时**，先分清用的是哪个 builder：
+
+- **BuildKit**（`docker buildx` 或装了 buildx）：默认**不逐行转发** `RUN` 的输出，
+  一个耗时的 `RUN` 会长时间一行都不打、看着像死住。加 `--progress=plain` 就能看到逐行日志。
+- **旧版 builder**（日志里会提示 `DEPRECATED: The legacy builder is deprecated`）：
+  **本来就逐行输出**，而且**不认识 `--progress` 这个参数**（会直接报 unknown flag）。
+  这种情况不需要加任何东西，日志里能直接看到是哪一步、哪个包慢。
 
 ```bash
-docker build --progress=plain --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t registry-manager:0.9.6 .
+# BuildKit 才需要 --progress=plain
+docker build --progress=plain --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t registry-manager:0.9.7 .
 ```
 
-BuildKit 默认不逐行转发构建步骤的输出，一个耗时较长的 `RUN` 会长时间没有任何新行 ——
-看着像死住，其实在下载。加上它才能分清是"在慢慢下"还是"真的卡在某处"。
+判断这条链路到底有多慢，看 pnpm 自己打的警告就够了：它会给出
+`Tarball download average speed … is below 50 KiB/s` 与 `Request took 22063ms`。
+**几 KiB/s 的量级时，调大超时是没用的** —— 一个 10 MB 的包要下几小时，换源才是解法。
 
 在 Apple Silicon 上构建、但目标是 amd64 集群时加 `--platform linux/amd64`。
 
@@ -190,7 +198,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.9.6
+  registry-manager:0.9.7
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -216,8 +224,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.9.6 192.0.2.10:10001/example/registry-manager:0.9.6
-docker push 192.0.2.10:10001/example/registry-manager:0.9.6
+docker tag registry-manager:0.9.7 192.0.2.10:10001/example/registry-manager:0.9.7
+docker push 192.0.2.10:10001/example/registry-manager:0.9.7
 ```
 
 ### 镜像内置
@@ -658,7 +666,7 @@ notifications:
 | --- | --- | --- | --- | --- | --- |
 | `docker/27.3.1 …` | 12 | 12 | 3 周前 | 昨天 | 忽略 |
 | `regclient/regsync (v0.11.5)` | 8230 | 0 | 3 周前 | 2 小时前 | 已忽略 |
-| `registry-manager/0.9.6` | 178 | 0 | 3 周前 | 刚刚 | 本工具 |
+| `registry-manager/0.9.7` | 178 | 0 | 3 周前 | 刚刚 | 本工具 |
 | `some-cron/1.0` | **7** | **7** | **2 天前** | 8 小时前 | **忽略** ← 一眼看到 |
 
 - **行数只跟"有多少个不同的客户端"有关**，与事件量无关 —— 全部 regsync 流量只占一行；

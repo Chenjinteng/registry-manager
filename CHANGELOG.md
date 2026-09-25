@@ -6,6 +6,23 @@
 - **中**：每新增一个功能或模块 +1；
 - **小**：缺陷修复与现有功能优化。
 
+## [0.9.7] - 2026-09-25
+
+修正 0.9.6 里那条排障建议：`--progress=plain` **只对 BuildKit 有效**。
+
+### 文档
+
+- 0.9.6 写了"构建看起来卡住时加 `--progress=plain`"，但没有区分 builder。
+  实际拿到构建机日志才发现它用的是**旧版 builder**（日志里那句
+  `DEPRECATED: The legacy builder is deprecated`）：旧版 builder **本来就逐行输出**，
+  而且**不认识 `--progress`**（会直接报 unknown flag）。照文档敲会撞一个无关的错。
+  现在按 builder 分开写清楚了。
+- 顺带写清怎么判断链路有多慢：直接看 pnpm 自己打的
+  `Tarball download average speed … below 50 KiB/s` 与 `Request took 22063ms`。
+  **几 KiB/s 的量级下调大超时是没用的** —— 一个 10 MB 的包要下几小时，换源才是解法。
+  这条是拿一次真实构建日志核对的：241 个包里大量在 1~46 KiB/s，
+  metadata 请求单次 20~32 s，最终 `antd` 的 tarball 超时失败。
+
 ## [0.9.6] - 2026-09-25
 
 修 0.9.5 的漏洞：**那个开关只管住了 pnpm，没管住 corepack** ——
