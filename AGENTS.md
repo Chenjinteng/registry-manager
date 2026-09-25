@@ -412,8 +412,18 @@ node server/index.mjs
     真实发生过：`@esbuild/linux-x64` 拉取超时导致构建失败。
   - ⚠️ **`pnpm config set` 必须带 `--location=project`**。不带的话命令正常退出、不写任何文件，
     然后继续去 npmjs 拉 —— "成功但没生效"比直接失败难查得多（本机实测确认）。
+  - ⚠️ **必须同时设 `COREPACK_NPM_REGISTRY`，否则只修一半。** `corepack enable pnpm && pnpm --version`
+    那一步会去下载 **pnpm 本身**，而 corepack **只认 `COREPACK_NPM_REGISTRY`、完全不读项目 `.npmrc`**
+    （查过 corepack 源码：全文只出现这一个变量名，没有任何 `.npmrc` 处理）。
+    漏掉它的表现极具迷惑性：构建**卡在第一步**、连 pnpm 都没装好就停住 ——
+    而且改动那个 RUN 层会让 Docker 层缓存失效、逼着 corepack 重新下载，
+    于是"本来勉强能过的构建，改完 Dockerfile 反而一步都不动了"（真实发生过）。
+  - 这两处都在同一条 `RUN` 里用 `if [ -n "$NPM_REGISTRY" ]; then export ...; fi` 挂上，
+    不传参数时**不做任何事、不写任何文件**，与改动前完全一致。
   - 代理是另一个口子（`HTTP_PROXY` / `HTTPS_PROXY`），两者都只作用于构建阶段。
     代理地址必须是**构建容器内**可达的：写 `127.0.0.1` 只会指向容器自己。
+  - 排障时记得 `--progress=plain`：BuildKit 默认不逐行转发 `RUN` 的输出，
+    一个慢下载会长时间一行都不打，看着像死住。别据此判定"卡住了"。
 - `docker-compose.yml` 是给人用的便捷入口，**它传的环境变量必须以 `server/config.mjs`
   实际读取的为准**，不要自造变量名。当前这一组是：
 

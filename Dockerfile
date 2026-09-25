@@ -29,11 +29,17 @@ ARG NO_PROXY
 
 # 构建机到 registry.npmjs.org 慢或不通时换源（不传就保持默认，仍走 npmjs）。
 #
+# ⚠️ 它必须同时管住**两个**下载器，少一个就会"设了也没用"：
+#   1. `corepack` —— `pnpm --version` 那一步会去下载 pnpm 本身，
+#      而 corepack **只认 COREPACK_NPM_REGISTRY，完全不读项目 .npmrc**（查过源码）。
+#      漏掉它的表现是：构建卡在第一步、连 pnpm 都没装好就停住。
+#      改动这一层还会让 Docker 的层缓存失效、逼着 corepack 重新下载 ——
+#      于是"本来能过的构建，改完 Dockerfile 反而一步都不动了"。
+#   2. `pnpm` 自己 —— 靠写进项目 .npmrc 生效（必须带 --location=project）。
+#
 # 真正需要联网现拿的是**平台二进制包** —— `@esbuild/linux-x64`、
 # `@rollup/rollup-linux-x64-musl` 之类：它们在 macOS 上装到的是 darwin 变体，
 # Linux 容器里必须重新下载。其余纯 JS 依赖与平台无关，本来就会命中缓存。
-# 所以"构建机上 npmjs 很慢"通常就卡在这几个包上，表现为下载超时、
-# 而本地 pnpm install 一切正常。
 #
 # 只作用于构建阶段，不会进入最终镜像。
 ARG NPM_REGISTRY
@@ -44,9 +50,10 @@ ENV CI=true \
 
 # pnpm 版本由 package.json 的 packageManager 字段固定为 11.20.0。
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-# 必须写 --location=project：pnpm config set 默认不落到项目 .npmrc 上，不加这个参数
+# --location=project：pnpm config set 默认不落到项目 .npmrc 上，不加这个参数
 # 命令会"成功"但完全不生效，然后继续去 npmjs 拉（比直接失败更难查）。
-RUN corepack enable pnpm \
+RUN if [ -n "$NPM_REGISTRY" ]; then export COREPACK_NPM_REGISTRY="$NPM_REGISTRY"; fi \
+ && corepack enable pnpm \
  && pnpm --version \
  && if [ -n "$NPM_REGISTRY" ]; then pnpm config set registry "$NPM_REGISTRY" --location=project; fi
 
@@ -74,7 +81,8 @@ ENV CI=true \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN corepack enable pnpm \
+RUN if [ -n "$NPM_REGISTRY" ]; then export COREPACK_NPM_REGISTRY="$NPM_REGISTRY"; fi \
+ && corepack enable pnpm \
  && pnpm --version \
  && if [ -n "$NPM_REGISTRY" ]; then pnpm config set registry "$NPM_REGISTRY" --location=project; fi \
  && pnpm install --prod --frozen-lockfile
