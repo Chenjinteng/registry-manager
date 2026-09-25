@@ -6,6 +6,39 @@
 - **中**：每新增一个功能或模块 +1；
 - **小**：缺陷修复与现有功能优化。
 
+## [0.9.5] - 2026-09-25
+
+`docker build` 卡在下载依赖上：加一个可选的 npm 来源开关。
+
+### 新增
+
+- **`--build-arg NPM_REGISTRY=`**：构建机到 `registry.npmjs.org` 慢或不通时换源。
+  不传就保持默认，**行为与以前完全一样**。只作用于构建阶段，不会进入最终镜像。
+
+### 修复（构建）
+
+- 背景是一次真实的构建失败：`pnpm install --frozen-lockfile` 拉
+  `@esbuild/linux-x64` 超时，报 `[23] The operation was aborted due to timeout`。
+  **这不是代码或依赖的问题** —— 卡住的是**平台二进制包**：esbuild / rollup 按平台分包，
+  macOS 上装到的是 `darwin` 变体，Linux 容器里必须重新下载，
+  所以"本地 install 一切正常、一构建就超时"。同类还有 `@rollup/rollup-linux-x64-musl`
+  （alpine 是 musl），修好一个之后很可能轮到它。
+- 实测同一个 4.4 MB 的包：`registry.npmjs.org` 约 **10.4 s**（~0.43 MB/s），
+  `registry.npmmirror.com` 约 **0.7 s**（~6 MB/s）。pnpm 默认单请求超时 60 s ——
+  链路是"慢"而不是"不通"，所以表现为**有时能过、有时超时**。
+- 两个阶段（`builder` / `prod-deps`）都加了，否则只修一半。
+
+### 文档
+
+- README 的构建一节补上用法、以及"什么时候需要它"（本地正常、构建超时）。
+- AGENTS.md：记下"要写 `--location=project`"这个坑。
+
+### 注意
+
+`pnpm config set registry ...` **不加 `--location=project` 是不生效的**：命令会正常退出、
+不写任何文件，然后继续去 npmjs 拉 —— 比直接报错更难查。本机实测确认过两个分支：
+不传参数时链路照常继续、不生成 `.npmrc`；传了才写出来并被 pnpm 采用。
+
 ## [0.9.4] - 2026-09-25
 
 三条来自实际使用的反馈：进度条长短不一、导航顺序不顺手、拉完镜像搜不到。

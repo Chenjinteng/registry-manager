@@ -404,6 +404,16 @@ node server/index.mjs
   `EACCES: permission denied, open '/app/server/index.mjs'`。
 - `registry.config.json` 由 `.dockerignore` 排除，**绝不能打进镜像**（会把某台机器的地址与代理固化）。
 - 基础镜像可用 `--build-arg NODE_IMAGE=` 覆盖，供拉不到 Docker Hub 的构建机使用。
+- **npm 来源可用 `--build-arg NPM_REGISTRY=` 覆盖**（`builder` 与 `prod-deps` **两处都要**，
+  否则只修一半）。不传即默认 `registry.npmjs.org`，行为不变。
+  - 它存在的理由是**平台二进制包**：`@esbuild/linux-x64`、`@rollup/rollup-linux-x64-musl`
+    之类在 macOS 上装到的是 darwin 变体，Linux 容器里必须重新下载 ——
+    所以典型症状是"本地 `pnpm install` 一切正常，`docker build` 却下载超时"。
+    真实发生过：`@esbuild/linux-x64` 拉取超时导致构建失败。
+  - ⚠️ **`pnpm config set` 必须带 `--location=project`**。不带的话命令正常退出、不写任何文件，
+    然后继续去 npmjs 拉 —— "成功但没生效"比直接失败难查得多（本机实测确认）。
+  - 代理是另一个口子（`HTTP_PROXY` / `HTTPS_PROXY`），两者都只作用于构建阶段。
+    代理地址必须是**构建容器内**可达的：写 `127.0.0.1` 只会指向容器自己。
 - `docker-compose.yml` 是给人用的便捷入口，**它传的环境变量必须以 `server/config.mjs`
   实际读取的为准**，不要自造变量名。当前这一组是：
 

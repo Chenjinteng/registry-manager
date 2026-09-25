@@ -116,7 +116,7 @@ docker compose up -d --build
 | `REGISTRY_CREDENTIAL_KEY` | 无（强烈建议填） | 凭据库加密密钥；缺失时凭据库不可用（拉取仍可匿名） |
 | `REGISTRY_CREDENTIALS_DIR` | `/app/data` | 数据目录：凭据、代理库与 SQLite 数据库都在这里 |
 | `HOST_PORT` | `8787` | 宿主机端口（容器内固定 8787） |
-| `IMAGE` | `registry-manager:0.9.4` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
+| `IMAGE` | `registry-manager:0.9.5` | 镜像名；改成带 registry 前缀的完整名即可直接 `docker compose push` |
 | `NODE_IMAGE` | `node:22-alpine` | 构建用基础镜像，供拉不到 Docker Hub 的构建机覆盖 |
 
 注意 `REGISTRY_PROXY` 是**访问 registry** 用的代理，和**构建机访问 npm** 用的代理是两回事，
@@ -127,7 +127,7 @@ docker compose up -d --build
 ### 构建
 
 ```bash
-docker build -t registry-manager:0.9.4 .
+docker build -t registry-manager:0.9.5 .
 ```
 
 **构建机拉不到 Docker Hub 时**，先把 `node:22-alpine` 推进内网 registry，再覆盖基础镜像：
@@ -135,7 +135,7 @@ docker build -t registry-manager:0.9.4 .
 ```bash
 docker build \
   --build-arg NODE_IMAGE=192.0.2.10:10001/node:22-alpine \
-  -t registry-manager:0.9.4 .
+  -t registry-manager:0.9.5 .
 ```
 
 注意镜像里那份 `node:22-alpine` 是 **amd64 单架构**，在 arm64 机器上构建需要另找 arm64 的基础镜像。
@@ -146,12 +146,27 @@ docker build \
 docker build \
   --build-arg HTTP_PROXY=http://<构建容器能访问到的代理>:<端口> \
   --build-arg HTTPS_PROXY=http://<构建容器能访问到的代理>:<端口> \
-  -t registry-manager:0.9.4 .
+  -t registry-manager:0.9.5 .
 ```
 
 ⚠️ 代理地址必须是**构建容器内**能访问到的地址。写 `127.0.0.1` 只会指向容器自己，不是宿主机；
 Linux 上用宿主机在 docker0 上的地址（或用 `--network=host`），macOS/Windows 上用
 `host.docker.internal`。
+
+**构建机到 npmjs 慢或不通时**，换个源（同样只作用于构建阶段）：
+
+```bash
+docker build \
+  --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
+  -t registry-manager:0.9.5 .
+```
+
+不传这个参数就仍是默认的 `registry.npmjs.org`，行为与以前完全一样。
+
+什么时候需要它：`pnpm install` 在**本地正常、在 docker build 里却下载超时** ——
+卡住的通常是平台二进制包（`@esbuild/linux-x64`、`@rollup/rollup-linux-x64-musl`）。
+macOS 上这些包装到的是 `darwin` 变体，Linux 容器里必须重新下载，所以只有构建镜像时才会
+去拉它们。实测同一个 4.4 MB 的包：npmjs 约 10.4 s，npmmirror 约 0.7 s。
 
 在 Apple Silicon 上构建、但目标是 amd64 集群时加 `--platform linux/amd64`。
 
@@ -162,7 +177,7 @@ docker run -d --name registry-manager \
   -p 8787:8787 \
   -e REGISTRY_URL=http://192.0.2.10:10001 \
   -e REGISTRY_PROXY=http://proxy.example.com:8080 \
-  registry-manager:0.9.4
+  registry-manager:0.9.5
 ```
 
 打开 http://localhost:8787 。常用变体：
@@ -188,8 +203,8 @@ docker run -d --name registry-manager \
 这个工具本身也可以托管在它管理的 registry 里：
 
 ```bash
-docker tag registry-manager:0.9.4 192.0.2.10:10001/example/registry-manager:0.9.4
-docker push 192.0.2.10:10001/example/registry-manager:0.9.4
+docker tag registry-manager:0.9.5 192.0.2.10:10001/example/registry-manager:0.9.5
+docker push 192.0.2.10:10001/example/registry-manager:0.9.5
 ```
 
 ### 镜像内置
@@ -630,7 +645,7 @@ notifications:
 | --- | --- | --- | --- | --- | --- |
 | `docker/27.3.1 …` | 12 | 12 | 3 周前 | 昨天 | 忽略 |
 | `regclient/regsync (v0.11.5)` | 8230 | 0 | 3 周前 | 2 小时前 | 已忽略 |
-| `registry-manager/0.9.4` | 178 | 0 | 3 周前 | 刚刚 | 本工具 |
+| `registry-manager/0.9.5` | 178 | 0 | 3 周前 | 刚刚 | 本工具 |
 | `some-cron/1.0` | **7** | **7** | **2 天前** | 8 小时前 | **忽略** ← 一眼看到 |
 
 - **行数只跟"有多少个不同的客户端"有关**，与事件量无关 —— 全部 regsync 流量只占一行；

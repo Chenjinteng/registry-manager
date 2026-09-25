@@ -27,13 +27,28 @@ ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
 
+# 构建机到 registry.npmjs.org 慢或不通时换源（不传就保持默认，仍走 npmjs）。
+#
+# 真正需要联网现拿的是**平台二进制包** —— `@esbuild/linux-x64`、
+# `@rollup/rollup-linux-x64-musl` 之类：它们在 macOS 上装到的是 darwin 变体，
+# Linux 容器里必须重新下载。其余纯 JS 依赖与平台无关，本来就会命中缓存。
+# 所以"构建机上 npmjs 很慢"通常就卡在这几个包上，表现为下载超时、
+# 而本地 pnpm install 一切正常。
+#
+# 只作用于构建阶段，不会进入最终镜像。
+ARG NPM_REGISTRY
+
 # 无 TTY 环境下 pnpm 不做交互确认；否则会在需要重装 node_modules 时报错。
 ENV CI=true \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 # pnpm 版本由 package.json 的 packageManager 字段固定为 11.20.0。
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN corepack enable pnpm && pnpm --version
+# 必须写 --location=project：pnpm config set 默认不落到项目 .npmrc 上，不加这个参数
+# 命令会"成功"但完全不生效，然后继续去 npmjs 拉（比直接失败更难查）。
+RUN corepack enable pnpm \
+ && pnpm --version \
+ && if [ -n "$NPM_REGISTRY" ]; then pnpm config set registry "$NPM_REGISTRY" --location=project; fi
 
 RUN pnpm install --frozen-lockfile
 
@@ -52,12 +67,16 @@ ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
 
+# 与 builder 阶段同一个来源开关（见上面的说明）。
+ARG NPM_REGISTRY
+
 ENV CI=true \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN corepack enable pnpm \
  && pnpm --version \
+ && if [ -n "$NPM_REGISTRY" ]; then pnpm config set registry "$NPM_REGISTRY" --location=project; fi \
  && pnpm install --prod --frozen-lockfile
 
 # ---------------------------------------------------------------------------
