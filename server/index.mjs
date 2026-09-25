@@ -155,6 +155,48 @@ function cleanupExpired() {
   }
 }
 
+/**
+ * 拉取成功后让「镜像列表」跟上。
+ *
+ * 不这么做的话，用户拉完镜像切回列表**搜不到刚拉的东西** —— 盘点有一份 TTL 缓存，
+ * 里面还是拉取之前的快照（真实反馈就是这个）。两步缺一不可：
+ *   1. **立刻作废缓存**：否则这期间进来的请求还是会拿到旧快照；
+ *   2. **后台重建**：让用户切过去时数据已经就绪，而不是让他对着 loading 等一次全量盘点。
+ *
+ * 合并连发：一次盘点要按 tag 数打上百个请求，连着拉十个镜像不该触发十轮。
+ * 跑的过程中又有人要，就在跑完之后**再补一轮**（只补一轮，不排队堆积）。
+ */
+let rescanRunning = false;
+let rescanAgain = false;
+
+async function rescanInventory(reason) {
+  if (rescanRunning) {
+    rescanAgain = true;
+    return;
+  }
+  rescanRunning = true;
+  try {
+    do {
+      rescanAgain = false;
+      await inventory.get({ force: true });
+    } while (rescanAgain);
+  } catch (error) {
+    // 自动盘点失败不该影响拉取结果（任务此时已经是 succeeded），记一条就够。
+    console.error(`[registry-manager] 拉取后自动盘点失败（${reason}）`, error);
+  } finally {
+    rescanRunning = false;
+  }
+}
+
+/** 任务到终态时调用。只有**成功**才需要重新盘点：失败/取消不会留下新的 tag。 */
+function onPullSettled(job) {
+  if (job.status !== 'succeeded') {
+    return;
+  }
+  inventory.invalidate();
+  void rescanInventory(`任务 ${job.id}`);
+}
+
 const pullQueue = new PullQueue({
   client,
   credentialStore: credentialStore ?? undefined,
@@ -162,6 +204,8 @@ const pullQueue = new PullQueue({
   historyLimit: config.pullQueueSize,
   // 拉取历史：数据库不可用时退化成原来的"纯内存历史"，不影响拉取本身。
   history: db,
+  // 拉取成功 → 立刻作废并后台重建盘点（见 onPullSettled）。
+  onSettled: onPullSettled,
 });
 
 const app = express();

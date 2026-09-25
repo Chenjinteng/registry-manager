@@ -414,7 +414,7 @@ export class PullQueue {
    * @param {CredentialStore} [args.credentialStore] 凭据库；提供则任务 / probe 时按 id 取账号密码
    * @param {number}        [args.historyLimit]
    */
-  constructor({ client, credentialStore, proxyStore, historyLimit = 50, history = null }) {
+  constructor({ client, credentialStore, proxyStore, historyLimit = 50, history = null, onSettled = null }) {
     this.client = client;
     this.credentialStore = credentialStore;
     this.proxyStore = proxyStore;
@@ -426,6 +426,15 @@ export class PullQueue {
      * 也就能在不建库的情况下跑完整流程。不传时退化成原来的"纯内存历史"。
      */
     this.history = history;
+    /**
+     * 任务到终态时的回调，可选。**在 `#settle` 里只触发一次**（靠 `job.settled` 兜住）。
+     *
+     * 存在的理由：拉取会改变 registry 的内容，而「镜像列表」那边有一份 TTL 缓存 ——
+     * 没有这个回调，用户拉完镜像切回去**搜不到刚拉的东西**（缓存里还是拉取前的快照）。
+     *
+     * **回调抛错不能影响任务结果**：拉取已经成功了，通知失败是旁支问题。
+     */
+    this.onSettled = typeof onSettled === 'function' ? onSettled : null;
     /** @type {Map<string, object>} jobId -> job */
     this.#jobs = new Map();
     /** jobId -> AbortController，仅占 running 的状态 */
@@ -637,6 +646,17 @@ export class PullQueue {
    */
   #settle(job) {
     if (job.settled) {
+      /*
+       * 这个守卫**不是**防御性冗余，有一条真实但很窄的竞态会走到这里：
+       * `#drain` 把 id 从 `#waiting` 取出后、`runner.run()` 把状态改成 running 之前，
+       * 若 `cancel()` 恰好进来，它会走"排队中"分支（`indexOf` 已经是 -1，splice 不动）
+       * 把任务标成 cancelled 并 settle 一次；随后 runner 在 `#ensureNotCancelled`
+       * 抛 CANCELLED，`#drain` 的 catch 又把状态置成 cancelled 并**再 settle 一次**。
+       * 少了这个守卫，就是同一次拉取触发两轮全量盘点。
+       *
+       * 这条竞态没法在验证脚本里确定性复现，所以别为它写"看起来在测"的断言
+       * （写过的那个 `cancel(已终态任务)` 根本进不到 #settle，等于没测）。
+       */
       return;
     }
     if (job.status !== 'succeeded' && job.status !== 'failed' && job.status !== 'cancelled') {
@@ -647,6 +667,15 @@ export class PullQueue {
       this.history?.recordPullJob?.(job);
     } catch (error) {
       console.error(`[registry-manager] 拉取历史写入失败（任务 ${job.id}）`, error);
+    }
+    /*
+     * 放在 `job.settled = true` 之后：回调自己再触发一次 settle 也不会重入。
+     * 同样**不让它影响任务结果** —— 通知是旁支，失败就记一条日志。
+     */
+    try {
+      this.onSettled?.(job);
+    } catch (error) {
+      console.error(`[registry-manager] 任务终态回调失败（任务 ${job.id}）`, error);
     }
   }
 

@@ -219,6 +219,18 @@ const heatSnapshot = () =>
 try {
   await send('Page.enable');
   await send('Runtime.enable');
+  /*
+   * 把模拟的系统外观**钉成浅色**。
+   *
+   * 首屏主题脚本的顺序是"先读 localStorage，读不到才退回系统偏好"，所以
+   * "初始是浅色（未设置过选择时）"这条断言实际上依赖**跑验证这台机器**的外观：
+   * 开发机切成深色之后，同一份代码会让这批断言整片翻红（真实发生过一次，
+   * 当时第一反应是"我的改动碰了主题？"）。钉住媒体特性，结果才只反映应用逻辑；
+   * 顺带让"刷新后仍是深色"变成真正在验 localStorage 压过系统偏好。
+   */
+  await send('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-color-scheme', value: 'light' }],
+  });
   await send('Page.navigate', { url: APP });
 
   if (!(await waitFor('!!document.querySelector(".ant-table-row")', '镜像列表出现数据行', 12000))) {
@@ -228,6 +240,21 @@ try {
     process.exit(0);
   }
   await sleep(900);
+
+  /*
+   * 导航顺序 = **使用频率**：「镜像列表」和「镜像拉取」是日常最常来的两件事，
+   * 必须在最前面；热度是回头查账时才来的。
+   * 顺序只写在 App.tsx 的 NAV_ITEMS 里，没有任何地方会因为有顺序变化而报错 ——
+   * 所以只能在这里量一次真实 DOM 顺序。
+   */
+  const navLabels = await evaluate(
+    `[...document.querySelectorAll('.app-nav .ant-segmented-item')].map((el) => el.textContent.trim())`
+  );
+  check(
+    '导航顺序按使用频率：镜像列表 → 镜像拉取 → 镜像热度',
+    (navLabels ?? []).slice(0, 3).join(' | ') === '镜像列表 | 镜像拉取 | 镜像热度',
+    JSON.stringify(navLabels)
+  );
 
   console.log('\n──── 镜像列表 ────');
   const before = await listSnapshot();
@@ -1005,6 +1032,59 @@ try {
   );
   await sleep(400);
   console.log('   截图:', await shot('layout-settings-rules'));
+
+  /*
+   * ──────────────── 镜像拉取：进度条必须一样长 ────────────────
+   *
+   * 真实反馈："这些镜像拉取的进度条的长是不一致的。"
+   *
+   * 根因不是进度不同，而是**条子宽度跟着文字走**：外层的 Space 是 `width: auto`，
+   * 会缩到最宽的子元素 —— 也就是条子下面那行 "128 MiB / 128 MiB"。Progress 默认占满
+   * 容器，于是字节数文字的长短直接决定了条子的长短。这样条子就失去了"可比较刻度"的意义。
+   *
+   * 断言只能量渲染结果：所有行的条子宽度必须一致。
+   */
+  console.log('\n──── 镜像拉取 ────');
+  await evaluate(
+    `[...document.querySelectorAll('.ant-segmented-item')].find((el) => el.textContent.includes('镜像拉取'))?.click()`
+  );
+  const pullReady = await waitFor(
+    `!!document.querySelector('.pull-progress-bar')`,
+    '拉取页出现进度条',
+    12000
+  );
+  if (!pullReady) {
+    skip('拉取进度条宽度', '拉取历史里没有任务（先拉一个镜像，或种子几条 pull_jobs）');
+  } else {
+    await sleep(500);
+    const bars = await evaluate(`(() => {
+      const rows = [...document.querySelectorAll('.ant-table-tbody tr.ant-table-row')];
+      return rows
+        .map((tr) => {
+          const bar = tr.querySelector('.pull-progress-bar');
+          if (!bar) return null;
+          const rect = bar.getBoundingClientRect();
+          return {
+            width: Math.round(rect.width),
+            caption: (tr.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 40),
+          };
+        })
+        .filter(Boolean);
+    })()`);
+    const widths = (bars ?? []).map((b) => b.width);
+    console.log('  ', JSON.stringify(bars));
+    check(
+      '拉取历史里确实有多行可比较（至少 2 条，否则这条断言说明不了什么）',
+      widths.length >= 2,
+      JSON.stringify(widths)
+    );
+    check(
+      '每行的进度条一样长（宽度不跟着下面那行字节数文字走）',
+      widths.length >= 2 && Math.max(...widths) - Math.min(...widths) <= 1,
+      JSON.stringify(widths)
+    );
+    console.log('   截图:', await shot('layout-pull-history'));
+  }
 } finally {
   ws.close();
   cleanup();

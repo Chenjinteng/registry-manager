@@ -295,6 +295,15 @@ const proxyEntry = await proxyStore.create({
   password: 'proxy:p@ss/1',
 });
 
+/**
+ * 任务终态回调（`onSettled`）：拉取成功后靠它去作废并重建「镜像列表」的盘点缓存。
+ *
+ * 这里**故意让回调抛错** —— 一次就够了，同时钉住两件事：
+ *   1. 回调确实被调用、且拿到的是终态任务；
+ *   2. 回调抛错**不影响任务结果**（拉取已经成功了，通知失败是旁支）。
+ * 实现里漏掉 try/catch 的话，这个脚本会直接崩掉，不会静默通过。
+ */
+const settledCalls = [];
 const queue = new PullQueue({
   client: new RegistryClient({
     url: dst.url,
@@ -303,6 +312,10 @@ const queue = new PullQueue({
   credentialStore: store,
   proxyStore,
   historyLimit: 5,
+  onSettled: (j) => {
+    settledCalls.push({ id: j.id, status: j.status });
+    throw new Error('回调故意抛错：不能影响任务结果');
+  },
 });
 
 const job = queue.enqueue({
@@ -313,6 +326,35 @@ const job = queue.enqueue({
   sourceCredentialId: srcCred.id,
   sourceProxyId: proxyEntry.id,
 });
+
+/*
+ * 再排一个任务：队列同时只跑一个，所以它会停在 `queued`。
+ * 用它钉住回调契约里能确定性复现的两条 —— "非终态不通知"、"排队中被取消也是终态、要通知"。
+ */
+const queuedJob = queue.enqueue({
+  sourceUrl: src.url,
+  sourceRef: 'lib/demo:v2',
+  destRepo: 'lib/demo',
+  destTag: 'v2',
+  sourceCredentialId: srcCred.id,
+  sourceProxyId: proxyEntry.id,
+});
+check(
+  '第二个任务排在队里（同时只有一个在跑）',
+  queue.get(queuedJob.id)?.status === 'queued',
+  String(queue.get(queuedJob.id)?.status)
+);
+check(
+  '还在排队 / 运行的任务不会触发终态回调（否则会边拉边盘点到一半）',
+  settledCalls.length === 0,
+  JSON.stringify(settledCalls)
+);
+queue.cancel(queuedJob.id);
+check(
+  '排队中被取消也算终态，同样通知一次（状态 cancelled）',
+  settledCalls.length === 1 && settledCalls[0]?.status === 'cancelled',
+  JSON.stringify(settledCalls)
+);
 
 const finished = await new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('拉取超时（30s）')), 30_000);
@@ -383,6 +425,23 @@ check(
   '所有请求都带认证（无匿名裸请求）',
   [...srcSeen, ...dstSeen].every((r) => r.auth !== '(none)'),
   `无认证请求数 ${[...srcSeen, ...dstSeen].filter((r) => r.auth === '(none)').length}`
+);
+
+/*
+ * 终态回调的三条契约。
+ *
+ * 背景：拉取会改变 registry 的内容，而「镜像列表」有一份 TTL 缓存 ——
+ * 没有这个回调，用户拉完镜像切回去**搜不到刚拉的东西**。
+ */
+check(
+  '成功任务的回调拿到 succeeded —— 每个终态各自通知一次，不重不漏',
+  settledCalls.length === 2 && settledCalls[1]?.status === 'succeeded',
+  JSON.stringify(settledCalls)
+);
+check(
+  '回调抛错不影响任务结果（拉取已经成功了，通知失败是旁支）',
+  finished.status === 'succeeded' && queue.get(job.id)?.status === 'succeeded',
+  `任务状态 ${queue.get(job.id)?.status}`
 );
 
 src.server.close();

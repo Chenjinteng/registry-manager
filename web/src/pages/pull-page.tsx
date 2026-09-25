@@ -1223,7 +1223,11 @@ function JobProgress({ job, detailed = false }: { job: PullJob; detailed?: boole
             : 'active'
         }
         showInfo={false}
-        style={detailed ? { width: '100%' } : undefined}
+        /*
+         * 宽度走 CSS（见 app.css 的 .pull-progress-bar）：表格里必须固定，
+         * 否则会缩成下面那行字节数文字的宽度，每行的条子长短不一。
+         */
+        className={detailed ? 'pull-progress-bar--fill' : 'pull-progress-bar'}
       />
       <span style={{ fontSize: 12, color: 'var(--color-text-3)' }}>
         {formatBytes(job.bytes)}

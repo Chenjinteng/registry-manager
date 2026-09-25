@@ -29,10 +29,17 @@ export type ThemeMode = 'light' | 'dark';
  *   header（顶栏）→ main（p-4）→ 顶部横向 Segmented 导航 → 页面内容
  * 应用内导航放在顶部，而不是左侧栏。
  */
+/*
+ * 顺序 = **使用频率**，不是功能分组。
+ *
+ * 「镜像列表」和「镜像拉取」是日常最常来的两件事（看一眼有什么、搬一个进来），
+ * 所以它们必须排在最前面、一屏内够得着；热度是"回头查账"时才来的，排在它们之后。
+ * 调整顺序时按这个判据，不要按"统计类放一起"之类的分类学去排。
+ */
 const NAV_ITEMS: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'images', label: '镜像列表', icon: <DockerOutlined /> },
-  { key: 'stats', label: '镜像热度', icon: <BarChartOutlined /> },
   { key: 'pull', label: '镜像拉取', icon: <CloudDownloadOutlined /> },
+  { key: 'stats', label: '镜像热度', icon: <BarChartOutlined /> },
   { key: 'credentials', label: '凭据管理', icon: <KeyOutlined /> },
   { key: 'proxies', label: '代理管理', icon: <ApiOutlined /> },
   { key: 'settings', label: '设置', icon: <SettingOutlined /> },
